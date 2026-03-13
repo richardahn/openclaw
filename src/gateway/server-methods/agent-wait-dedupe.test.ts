@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { DedupeEntry } from "../server-shared.js";
 import {
   __testing,
   readTerminalSnapshotFromGatewayDedupe,
@@ -8,7 +9,7 @@ import {
 
 describe("agent wait dedupe helper", () => {
   function setRunEntry(params: {
-    dedupe: Map<unknown, unknown>;
+    dedupe: Map<string, DedupeEntry>;
     kind: "agent" | "chat";
     runId: string;
     ts?: number;
@@ -37,7 +38,7 @@ describe("agent wait dedupe helper", () => {
   });
 
   it("unblocks waiters when a terminal chat dedupe entry is written", async () => {
-    const dedupe = new Map();
+    const dedupe = new Map<string, DedupeEntry>();
     const runId = "run-chat-terminal";
     const waiter = waitForTerminalGatewayDedupe({
       dedupe,
@@ -70,7 +71,7 @@ describe("agent wait dedupe helper", () => {
   });
 
   it("keeps stale chat dedupe blocked while agent dedupe is in-flight", async () => {
-    const dedupe = new Map();
+    const dedupe = new Map<string, DedupeEntry>();
     const runId = "run-stale-chat";
     setRunEntry({
       dedupe,
@@ -108,7 +109,7 @@ describe("agent wait dedupe helper", () => {
   });
 
   it("uses newer terminal chat snapshot when agent entry is non-terminal", () => {
-    const dedupe = new Map();
+    const dedupe = new Map<string, DedupeEntry>();
     const runId = "run-nonterminal-agent-with-newer-chat";
     setRunEntry({
       dedupe,
@@ -147,7 +148,7 @@ describe("agent wait dedupe helper", () => {
   });
 
   it("ignores stale agent snapshots when waiting for an active chat run", async () => {
-    const dedupe = new Map();
+    const dedupe = new Map<string, DedupeEntry>();
     const runId = "run-chat-active-ignore-agent";
     setRunEntry({
       dedupe,
@@ -198,7 +199,7 @@ describe("agent wait dedupe helper", () => {
 
   it("prefers the freshest terminal snapshot when agent/chat dedupe keys collide", () => {
     const runId = "run-collision";
-    const dedupe = new Map();
+    const dedupe = new Map<string, DedupeEntry>();
 
     setRunEntry({
       dedupe,
@@ -228,7 +229,7 @@ describe("agent wait dedupe helper", () => {
       error: "chat failed",
     });
 
-    const dedupeReverse = new Map();
+    const dedupeReverse = new Map<string, DedupeEntry>();
     setRunEntry({
       dedupe: dedupeReverse,
       kind: "chat",

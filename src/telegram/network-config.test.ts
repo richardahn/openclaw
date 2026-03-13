@@ -175,10 +175,12 @@ describe("resolveTelegramDnsResultOrderDecision", () => {
       nodeMajor: 22,
       expected: { value: "ipv4first", source: "default-node22" },
     },
-  ])("$name", ({ env, network, nodeMajor, expected }) => {
+  ] as const)("$name", ({ env, network, nodeMajor, expected }) => {
     const decision = resolveTelegramDnsResultOrderDecision({
       env,
-      network,
+      network: network as unknown as NonNullable<
+        Parameters<typeof resolveTelegramDnsResultOrderDecision>[0]
+      >["network"],
       nodeMajor,
     });
     expect(decision).toEqual(expected);

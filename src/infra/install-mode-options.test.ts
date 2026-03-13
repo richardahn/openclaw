@@ -21,7 +21,7 @@ describe("install mode option helpers", () => {
       params: { mode: "update" as const, dryRun: false },
       expected: { loggerKey: "default", mode: "update", dryRun: false },
     },
-  ])("$name", ({ params, expected }) => {
+  ] as const)("$name", ({ params, expected }) => {
     const loggers = {
       default: { warn: (_message: string) => {} },
       explicit: { warn: (_message: string) => {} },
@@ -68,13 +68,16 @@ describe("install mode option helpers", () => {
       expectedMode: "update",
       expectedDryRun: true,
     },
-  ])("$name", ({ params, defaultTimeoutMs, expectedTimeoutMs, expectedMode, expectedDryRun }) => {
-    const logger = { warn: (_message: string) => {} };
-    const result = resolveTimedInstallModeOptions(params, logger, defaultTimeoutMs);
+  ] as const)(
+    "$name",
+    ({ params, defaultTimeoutMs, expectedTimeoutMs, expectedMode, expectedDryRun }) => {
+      const logger = { warn: (_message: string) => {} };
+      const result = resolveTimedInstallModeOptions(params, logger, defaultTimeoutMs);
 
-    expect(result.timeoutMs).toBe(expectedTimeoutMs);
-    expect(result.mode).toBe(expectedMode);
-    expect(result.dryRun).toBe(expectedDryRun);
-    expect(result.logger).toBe(logger);
-  });
+      expect(result.timeoutMs).toBe(expectedTimeoutMs);
+      expect(result.mode).toBe(expectedMode);
+      expect(result.dryRun).toBe(expectedDryRun);
+      expect(result.logger).toBe(logger);
+    },
+  );
 });

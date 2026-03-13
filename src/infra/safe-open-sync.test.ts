@@ -125,7 +125,7 @@ describe("openVerifiedFileSync", () => {
       openSync: () => 42,
       fstatSync: () => mockStat({ isFile: true, size: 1, dev: 2, ino: 1 }),
       closeSync,
-    };
+    } as unknown as NonNullable<Parameters<typeof openVerifiedFileSync>[0]["ioFs"]>;
 
     const opened = openVerifiedFileSync({
       filePath: "/input/file.txt",
@@ -150,7 +150,7 @@ describe("openVerifiedFileSync", () => {
       openSync: () => 42,
       fstatSync: () => mockStat({ isFile: true }),
       closeSync: () => {},
-    };
+    } as unknown as NonNullable<Parameters<typeof openVerifiedFileSync>[0]["ioFs"]>;
 
     const opened = openVerifiedFileSync({
       filePath: "/input/file.txt",

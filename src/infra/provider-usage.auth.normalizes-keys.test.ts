@@ -186,7 +186,7 @@ describe("resolveProviderAuths key normalization", () => {
         { provider: "zai", token: "zai-key" },
         { provider: "minimax", token: "minimax-key" },
         { provider: "xiaomi", token: "xiaomi-key" },
-      ],
+      ] satisfies Awaited<ReturnType<typeof resolveProviderAuths>>,
     },
     {
       name: "accepts z-ai env alias and normalizes embedded CR/LF",
@@ -194,7 +194,9 @@ describe("resolveProviderAuths key normalization", () => {
       env: {
         Z_AI_API_KEY: "zai-\r\nkey",
       },
-      expected: [{ provider: "zai", token: "zai-key" }],
+      expected: [{ provider: "zai", token: "zai-key" }] satisfies Awaited<
+        ReturnType<typeof resolveProviderAuths>
+      >,
     },
     {
       name: "prefers ZAI_API_KEY over the z-ai alias when both are set",
@@ -203,7 +205,9 @@ describe("resolveProviderAuths key normalization", () => {
         ZAI_API_KEY: "direct-zai-key",
         Z_AI_API_KEY: "alias-zai-key",
       },
-      expected: [{ provider: "zai", token: "direct-zai-key" }],
+      expected: [{ provider: "zai", token: "direct-zai-key" }] satisfies Awaited<
+        ReturnType<typeof resolveProviderAuths>
+      >,
     },
     {
       name: "prefers MINIMAX_CODE_PLAN_KEY over MINIMAX_API_KEY",
@@ -212,9 +216,11 @@ describe("resolveProviderAuths key normalization", () => {
         MINIMAX_CODE_PLAN_KEY: "code-plan-key",
         MINIMAX_API_KEY: "api-key",
       },
-      expected: [{ provider: "minimax", token: "code-plan-key" }],
+      expected: [{ provider: "minimax", token: "code-plan-key" }] satisfies Awaited<
+        ReturnType<typeof resolveProviderAuths>
+      >,
     },
-  ])("$name", async ({ providers, env, expected }) => {
+  ] as const)("$name", async ({ providers, env, expected }) => {
     await expectResolvedAuthsFromSuiteHome({ providers: [...providers], env, expected });
   });
 

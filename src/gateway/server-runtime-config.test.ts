@@ -267,7 +267,11 @@ describe("resolveGatewayRuntimeConfig", () => {
         strictTransportSecurity: "   ",
         expected: undefined,
       },
-    ])("$name", async ({ strictTransportSecurity, expected }) => {
+    ] satisfies Array<{
+      name: string;
+      strictTransportSecurity: string | false;
+      expected: string | undefined;
+    }>)("$name", async ({ strictTransportSecurity, expected }) => {
       const result = await resolveGatewayRuntimeConfig({
         cfg: {
           gateway: {

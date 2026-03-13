@@ -1463,7 +1463,7 @@ describe("loadOpenClawPlugins", () => {
       logger: createWarningLogger(warnings),
       config: {
         plugins: {
-          load: { paths: [plugin.file] },
+          load: { paths: [plugin.file] as string[] },
         },
       },
     });
@@ -1488,7 +1488,7 @@ describe("loadOpenClawPlugins", () => {
           load: { paths: [plugin.file] },
         },
       },
-    } as const;
+    };
 
     loadOpenClawPlugins(options);
     loadOpenClawPlugins(options);

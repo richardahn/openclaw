@@ -8,7 +8,7 @@ import {
 } from "../infra/device-identity.js";
 import { withEnvAsync } from "../test-utils/env.js";
 import { buildDeviceAuthPayload } from "./device-auth.js";
-import { validateTalkConfigResult } from "./protocol/index.js";
+import { type TalkConfigResult, validateTalkConfigResult } from "./protocol/index.js";
 import {
   connectOk,
   installGatewayTestHooks,
@@ -21,25 +21,11 @@ installGatewayTestHooks({ scope: "suite" });
 
 type GatewaySocket = Parameters<Parameters<typeof withServer>[0]>[0];
 type SecretRef = { source?: string; provider?: string; id?: string };
-type TalkConfigPayload = {
-  config?: {
-    talk?: {
-      provider?: string;
-      providers?: {
-        elevenlabs?: { voiceId?: string; apiKey?: string | SecretRef };
-      };
-      resolved?: {
-        provider?: string;
-        config?: { voiceId?: string; apiKey?: string | SecretRef };
-      };
-      apiKey?: string | SecretRef;
-      voiceId?: string;
-      silenceTimeoutMs?: number;
-    };
-    session?: { mainKey?: string };
-    ui?: { seamColor?: string };
-  };
-};
+type TalkConfigPayload = TalkConfigResult;
+type NormalizedTalkConfigPayload = Extract<
+  NonNullable<TalkConfigPayload["config"]["talk"]>,
+  { resolved: unknown }
+>;
 const TALK_CONFIG_DEVICE_PATH = path.join(
   os.tmpdir(),
   `openclaw-talk-config-device-${process.pid}.json`,
@@ -95,26 +81,27 @@ async function fetchTalkConfig(
 }
 
 function expectElevenLabsTalkConfig(
-  talk: TalkConfigPayload["config"] extends { talk?: infer T } ? T : never,
+  talk: TalkConfigPayload["config"]["talk"],
   expected: {
     voiceId?: string;
     apiKey?: string | SecretRef;
     silenceTimeoutMs?: number;
   },
 ) {
-  expect(talk?.provider).toBe("elevenlabs");
-  expect(talk?.providers?.elevenlabs?.voiceId).toBe(expected.voiceId);
-  expect(talk?.resolved?.provider).toBe("elevenlabs");
-  expect(talk?.resolved?.config?.voiceId).toBe(expected.voiceId);
-  expect(talk?.voiceId).toBe(expected.voiceId);
+  const normalizedTalk = talk as NormalizedTalkConfigPayload | undefined;
+  expect(normalizedTalk?.provider).toBe("elevenlabs");
+  expect(normalizedTalk?.providers?.elevenlabs?.voiceId).toBe(expected.voiceId);
+  expect(normalizedTalk?.resolved?.provider).toBe("elevenlabs");
+  expect(normalizedTalk?.resolved?.config?.voiceId).toBe(expected.voiceId);
+  expect(normalizedTalk?.voiceId).toBe(expected.voiceId);
 
   if ("apiKey" in expected) {
-    expect(talk?.providers?.elevenlabs?.apiKey).toEqual(expected.apiKey);
-    expect(talk?.resolved?.config?.apiKey).toEqual(expected.apiKey);
-    expect(talk?.apiKey).toEqual(expected.apiKey);
+    expect(normalizedTalk?.providers?.elevenlabs?.apiKey).toEqual(expected.apiKey);
+    expect(normalizedTalk?.resolved?.config?.apiKey).toEqual(expected.apiKey);
+    expect(normalizedTalk?.apiKey).toEqual(expected.apiKey);
   }
   if ("silenceTimeoutMs" in expected) {
-    expect(talk?.silenceTimeoutMs).toBe(expected.silenceTimeoutMs);
+    expect(normalizedTalk?.silenceTimeoutMs).toBe(expected.silenceTimeoutMs);
   }
 }
 
