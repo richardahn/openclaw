@@ -75,6 +75,7 @@ import { SessionActorQueue } from "./session-actor-queue.js";
 const ACP_TURN_TIMEOUT_GRACE_MS = 1_000;
 const ACP_TURN_TIMEOUT_CLEANUP_GRACE_MS = 2_000;
 const ACP_TURN_TIMEOUT_REASON = "turn-timeout";
+const ACP_NO_TIMEOUT_MS = 2_147_000_000;
 
 export class AcpSessionManager {
   private readonly actorQueue = new SessionActorQueue();
@@ -708,6 +709,7 @@ export class AcpSessionManager {
             const turnTimeoutMs = this.resolveTurnTimeoutMs({
               cfg: input.cfg,
               meta,
+              inputTimeoutMs: input.timeoutMs,
             });
             const sessionMode = meta.mode;
             await this.awaitTurnWithTimeout({
@@ -824,19 +826,30 @@ export class AcpSessionManager {
     );
   }
 
-  private resolveTurnTimeoutMs(params: { cfg: OpenClawConfig; meta: SessionAcpMeta }): number {
+  private resolveTurnTimeoutMs(params: {
+    cfg: OpenClawConfig;
+    meta: SessionAcpMeta;
+    inputTimeoutMs?: number;
+  }): number {
     const runtimeTimeoutSeconds = resolveRuntimeOptionsFromMeta(params.meta).timeoutSeconds;
-    if (
+    const runtimeOrDefaultTimeoutMs =
       typeof runtimeTimeoutSeconds === "number" &&
       Number.isFinite(runtimeTimeoutSeconds) &&
       runtimeTimeoutSeconds > 0
+        ? Math.max(1_000, Math.round(runtimeTimeoutSeconds * 1_000))
+        : resolveAgentTimeoutMs({
+            cfg: params.cfg,
+            minMs: 1_000,
+          });
+    if (
+      typeof params.inputTimeoutMs !== "number" ||
+      !Number.isFinite(params.inputTimeoutMs) ||
+      params.inputTimeoutMs <= 0 ||
+      params.inputTimeoutMs >= ACP_NO_TIMEOUT_MS
     ) {
-      return Math.max(1_000, Math.round(runtimeTimeoutSeconds * 1_000));
+      return runtimeOrDefaultTimeoutMs;
     }
-    return resolveAgentTimeoutMs({
-      cfg: params.cfg,
-      minMs: 1_000,
-    });
+    return Math.min(runtimeOrDefaultTimeoutMs, Math.max(1_000, Math.floor(params.inputTimeoutMs)));
   }
 
   private async awaitTurnWithTimeout<T>(params: {

@@ -220,34 +220,77 @@ export function spawnWithResolvedCommand(
   });
 }
 
-export async function waitForExit(child: ChildProcessWithoutNullStreams): Promise<SpawnExit> {
+export async function waitForExit(
+  child: ChildProcessWithoutNullStreams,
+  runtime?: {
+    signal?: AbortSignal;
+  },
+): Promise<SpawnExit> {
+  let abortKillTimer: NodeJS.Timeout | undefined;
+  let aborted = false;
+  const onAbort = () => {
+    aborted = true;
+    try {
+      child.kill("SIGTERM");
+    } catch {
+      // Ignore kill races when child already exited.
+    }
+    abortKillTimer = setTimeout(() => {
+      if (child.exitCode !== null || child.signalCode !== null) {
+        return;
+      }
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // Ignore kill races when child already exited.
+      }
+    }, 250);
+    abortKillTimer.unref?.();
+  };
+
   // Handle callers that start waiting after the child has already exited.
   if (child.exitCode !== null || child.signalCode !== null) {
     return {
       code: child.exitCode,
       signal: child.signalCode,
-      error: null,
+      error: aborted ? createAbortError() : null,
     };
   }
 
-  return await new Promise<SpawnExit>((resolve) => {
-    let settled = false;
-    const finish = (result: SpawnExit) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      resolve(result);
-    };
+  if (runtime?.signal?.aborted) {
+    onAbort();
+  } else {
+    runtime?.signal?.addEventListener("abort", onAbort, { once: true });
+  }
 
-    child.once("error", (err) => {
-      finish({ code: null, signal: null, error: err });
-    });
+  try {
+    return await new Promise<SpawnExit>((resolve) => {
+      let settled = false;
+      const finish = (result: SpawnExit) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        resolve({
+          ...result,
+          error: aborted && result.error == null ? createAbortError() : result.error,
+        });
+      };
 
-    child.once("close", (code, signal) => {
-      finish({ code, signal, error: null });
+      child.once("error", (err) => {
+        finish({ code: null, signal: null, error: err });
+      });
+
+      child.once("close", (code, signal) => {
+        finish({ code, signal, error: null });
+      });
     });
-  });
+  } finally {
+    runtime?.signal?.removeEventListener("abort", onAbort);
+    if (abortKillTimer) {
+      clearTimeout(abortKillTimer);
+    }
+  }
 }
 
 export async function spawnAndCollect(
@@ -287,43 +330,13 @@ export async function spawnAndCollect(
     stderr += String(chunk);
   });
 
-  let abortKillTimer: NodeJS.Timeout | undefined;
-  let aborted = false;
-  const onAbort = () => {
-    aborted = true;
-    try {
-      child.kill("SIGTERM");
-    } catch {
-      // Ignore kill races when child already exited.
-    }
-    abortKillTimer = setTimeout(() => {
-      if (child.exitCode !== null || child.signalCode !== null) {
-        return;
-      }
-      try {
-        child.kill("SIGKILL");
-      } catch {
-        // Ignore kill races when child already exited.
-      }
-    }, 250);
-    abortKillTimer.unref?.();
+  const exit = await waitForExit(child, runtime);
+  return {
+    stdout,
+    stderr,
+    code: exit.code,
+    error: exit.error,
   };
-  runtime?.signal?.addEventListener("abort", onAbort, { once: true });
-
-  try {
-    const exit = await waitForExit(child);
-    return {
-      stdout,
-      stderr,
-      code: exit.code,
-      error: aborted ? createAbortError() : exit.error,
-    };
-  } finally {
-    runtime?.signal?.removeEventListener("abort", onAbort);
-    if (abortKillTimer) {
-      clearTimeout(abortKillTimer);
-    }
-  }
 }
 
 export function resolveSpawnFailure(

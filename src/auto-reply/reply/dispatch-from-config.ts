@@ -1,5 +1,6 @@
 import { resolveSendableOutboundReplyParts } from "openclaw/plugin-sdk/reply-payload";
 import { resolveSessionAgentId } from "../../agents/agent-scope.js";
+import { resolveAgentTimeoutMs } from "../../agents/timeout.js";
 import {
   resolveConversationBindingRecord,
   touchConversationBindingRecord,
@@ -511,6 +512,10 @@ export async function dispatchReplyFromConfig(params: {
     }
 
     const shouldSendToolSummaries = ctx.ChatType !== "group" && ctx.CommandSource !== "native";
+    const acpDispatchTimeoutMs = resolveAgentTimeoutMs({
+      cfg,
+      overrideSeconds: params.replyOptions?.timeoutOverrideSeconds,
+    });
     const acpDispatch = await dispatchAcpRuntime.tryDispatchAcpReply({
       ctx,
       cfg,
@@ -525,6 +530,8 @@ export async function dispatchReplyFromConfig(params: {
       originatingTo,
       shouldSendToolSummaries,
       bypassForCommand: bypassAcpForCommand,
+      abortSignal: params.replyOptions?.abortSignal,
+      timeoutMs: acpDispatchTimeoutMs,
       onReplyStart: params.replyOptions?.onReplyStart,
       recordProcessed,
       markIdle,
@@ -664,6 +671,8 @@ export async function dispatchReplyFromConfig(params: {
         originatingTo,
         shouldSendToolSummaries,
         bypassForCommand: false,
+        abortSignal: params.replyOptions?.abortSignal,
+        timeoutMs: acpDispatchTimeoutMs,
         onReplyStart: params.replyOptions?.onReplyStart,
         recordProcessed,
         markIdle,

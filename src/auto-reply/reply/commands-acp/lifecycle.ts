@@ -16,6 +16,7 @@ import {
   resolveAcpThreadSessionDetailLines,
 } from "../../../acp/runtime/session-identifiers.js";
 import { resolveAcpSpawnRuntimePolicyError } from "../../../agents/acp-spawn.js";
+import { resolveAgentTimeoutMs } from "../../../agents/timeout.js";
 import {
   resolveThreadBindingIntroText,
   resolveThreadBindingThreadName,
@@ -490,6 +491,7 @@ async function runAcpSteer(params: {
     text: params.instruction,
     mode: "steer",
     requestId: params.requestId,
+    timeoutMs: resolveAgentTimeoutMs({ cfg: params.cfg }),
     onEvent: (event) => {
       if (event.type !== "text_delta") {
         return;

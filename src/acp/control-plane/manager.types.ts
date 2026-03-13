@@ -61,6 +61,7 @@ export type AcpRunTurnInput = {
   mode: AcpRuntimePromptMode;
   requestId: string;
   signal?: AbortSignal;
+  timeoutMs?: number;
   onEvent?: (event: AcpRuntimeEvent) => Promise<void> | void;
 };
 
@@ -122,6 +123,7 @@ export type ActiveTurnState = {
   handle: AcpRuntimeHandle;
   abortController: AbortController;
   cancelPromise?: Promise<void>;
+  terminationReason?: "cancel" | "timeout" | "caller-abort";
 };
 
 export type TurnLatencyStats = {
