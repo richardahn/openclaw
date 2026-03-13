@@ -1303,7 +1303,10 @@ prefers `local`. Ollama is supported when you explicitly set
 `memorySearch.provider = "ollama"`.
 
 If you'd rather stay local, set `memorySearch.provider = "local"` (and optionally
-`memorySearch.fallback = "none"`). If you want Gemini embeddings, set
+`memorySearch.fallback = "none"`). On npm installs of OpenClaw 2026.3.12+,
+`node-llama-cpp` is an optional peer, so install/satisfy it explicitly in the
+same install prefix after installing or updating OpenClaw; reinstalling
+OpenClaw alone does not bring it back. If you want Gemini embeddings, set
 `memorySearch.provider = "gemini"` and provide `GEMINI_API_KEY` (or
 `memorySearch.remote.apiKey`). We support **OpenAI, Gemini, Voyage, Mistral, Ollama, or local** embedding
 models - see [Memory](/concepts/memory) for the setup details.

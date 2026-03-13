@@ -304,7 +304,7 @@ function formatLocalSetupError(err: unknown): string {
   return [
     "Local embeddings unavailable.",
     missing
-      ? "Reason: optional dependency node-llama-cpp is missing (or failed to install)."
+      ? "Reason: optional peer dependency node-llama-cpp is missing (or failed to install)."
       : detail
         ? `Reason: ${detail}`
         : undefined,
@@ -312,9 +312,9 @@ function formatLocalSetupError(err: unknown): string {
     "To enable local embeddings:",
     "1) Use Node 24 (recommended for installs/updates; Node 22 LTS, currently 22.16+, remains supported)",
     missing
-      ? "2) Reinstall OpenClaw (this should install node-llama-cpp): npm i -g openclaw@latest"
+      ? "2) Install/satisfy node-llama-cpp in the same install prefix as OpenClaw after installing/updating OpenClaw; reinstalling OpenClaw alone will not restore this optional peer."
       : null,
-    "3) If you use pnpm: pnpm approve-builds (select node-llama-cpp), then pnpm rebuild node-llama-cpp",
+    "3) If you use pnpm: after installing node-llama-cpp, run pnpm approve-builds (select node-llama-cpp), then pnpm rebuild node-llama-cpp",
     ...REMOTE_EMBEDDING_PROVIDER_IDS.map(
       (provider) => `Or set agents.defaults.memorySearch.provider = "${provider}" (remote).`,
     ),

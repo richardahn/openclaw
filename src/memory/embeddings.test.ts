@@ -403,7 +403,16 @@ describe("embedding provider local fallback", () => {
 
   it("throws a helpful error when local is requested and fallback is none", async () => {
     mockMissingLocalEmbeddingDependency();
-    await expect(createLocalProvider()).rejects.toThrow(/optional dependency node-llama-cpp/i);
+
+    const error = await createLocalProvider().catch((err: unknown) => err as Error);
+
+    expect(error).toBeInstanceOf(Error);
+    expect(error.message).toContain("optional peer dependency node-llama-cpp");
+    expect(error.message).toContain("same install prefix as OpenClaw");
+    expect(error.message).toContain(
+      "reinstalling OpenClaw alone will not restore this optional peer",
+    );
+    expect(error.message).not.toContain("Reinstall OpenClaw (this should install node-llama-cpp)");
   });
 
   it("mentions every remote provider in local setup guidance", async () => {
