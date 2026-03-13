@@ -91,8 +91,10 @@ vi.mock("@mariozechner/pi-ai/oauth", () => ({
   getOAuthProviders: vi.fn(() => []),
 }));
 
-vi.mock("@mariozechner/pi-coding-agent", () => {
+vi.mock("@mariozechner/pi-coding-agent", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@mariozechner/pi-coding-agent")>();
   return {
+    ...actual,
     createAgentSession: vi.fn(async () => {
       const session = {
         sessionId: "session-1",
@@ -277,9 +279,13 @@ vi.mock("../../config/channel-capabilities.js", () => ({
   resolveChannelCapabilities: vi.fn(() => undefined),
 }));
 
-vi.mock("../../utils/message-channel.js", () => ({
-  normalizeMessageChannel: vi.fn(() => undefined),
-}));
+vi.mock("../../utils/message-channel.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../utils/message-channel.js")>();
+  return {
+    ...actual,
+    normalizeMessageChannel: vi.fn(() => undefined),
+  };
+});
 
 vi.mock("../pi-embedded-helpers.js", () => ({
   ensureSessionHeader: vi.fn(async () => {}),
