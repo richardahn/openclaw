@@ -69,6 +69,59 @@ import {
 } from "./runtime-options.js";
 import { SessionActorQueue } from "./session-actor-queue.js";
 
+const ACP_NO_TIMEOUT_MS = 2_147_000_000;
+
+function isAbortLikeError(error: unknown): boolean {
+  if (error instanceof Error && error.name === "AbortError") {
+    return true;
+  }
+  if (error instanceof AcpRuntimeError) {
+    return isAbortLikeError(error.cause);
+  }
+  if (error && typeof error === "object" && "cause" in error) {
+    return isAbortLikeError((error as { cause?: unknown }).cause);
+  }
+  return false;
+}
+
+function normalizeTurnTimeoutMs(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return undefined;
+  }
+  const rounded = Math.floor(value);
+  if (rounded <= 0 || rounded >= ACP_NO_TIMEOUT_MS) {
+    return undefined;
+  }
+  return rounded;
+}
+
+function resolveAcpTurnTimeoutMs(params: {
+  inputTimeoutMs?: number;
+  meta: SessionAcpMeta;
+}): number | undefined {
+  const runtimeOptions = resolveRuntimeOptionsFromMeta(params.meta);
+  const candidates = [normalizeTurnTimeoutMs(params.inputTimeoutMs)];
+  if (
+    typeof runtimeOptions.timeoutSeconds === "number" &&
+    Number.isFinite(runtimeOptions.timeoutSeconds) &&
+    runtimeOptions.timeoutSeconds > 0
+  ) {
+    candidates.push(Math.max(1, Math.floor(runtimeOptions.timeoutSeconds * 1000)));
+  }
+  return candidates
+    .filter((value): value is number => typeof value === "number")
+    .toSorted((a, b) => a - b)[0];
+}
+
+function formatAcpTurnTimeoutMessage(timeoutMs: number): string {
+  const normalized = Math.max(1, Math.floor(timeoutMs));
+  const duration =
+    normalized >= 1000
+      ? `${(normalized / 1000).toFixed(normalized % 1000 === 0 ? 0 : 1)}s`
+      : `${normalized}ms`;
+  return `ACP turn timed out after ${duration}; cancel requested to unblock the session.`;
+}
+
 export class AcpSessionManager {
   private readonly actorQueue = new SessionActorQueue();
   private readonly actorTailBySession = this.actorQueue.getTailMapForTesting();
@@ -636,23 +689,39 @@ export class AcpSessionManager {
         clearLastError: true,
       });
 
+      const turnTimeoutMs = resolveAcpTurnTimeoutMs({
+        inputTimeoutMs: input.timeoutMs,
+        meta,
+      });
       const internalAbortController = new AbortController();
-      const onCallerAbort = () => {
-        internalAbortController.abort();
-      };
-      if (input.signal?.aborted) {
-        internalAbortController.abort();
-      } else if (input.signal) {
-        input.signal.addEventListener("abort", onCallerAbort, { once: true });
-      }
-
       const activeTurn: ActiveTurnState = {
         runtime,
         handle,
         abortController: internalAbortController,
       };
+      const onCallerAbort = () => {
+        activeTurn.terminationReason ??= "caller-abort";
+        internalAbortController.abort();
+      };
+      if (input.signal?.aborted) {
+        activeTurn.terminationReason = "caller-abort";
+        internalAbortController.abort();
+      } else if (input.signal) {
+        input.signal.addEventListener("abort", onCallerAbort, { once: true });
+      }
+
+      let turnTimeoutTimer: NodeJS.Timeout | undefined;
+      if (turnTimeoutMs) {
+        turnTimeoutTimer = setTimeout(() => {
+          activeTurn.terminationReason ??= "timeout";
+          internalAbortController.abort();
+        }, turnTimeoutMs);
+        turnTimeoutTimer.unref?.();
+      }
+
       this.activeTurnBySession.set(actorKey, activeTurn);
 
+      let sawDone = false;
       let streamError: AcpRuntimeError | null = null;
       try {
         const combinedSignal =
@@ -667,6 +736,9 @@ export class AcpSessionManager {
           requestId: input.requestId,
           signal: combinedSignal,
         })) {
+          if (event.type === "done") {
+            sawDone = true;
+          }
           if (event.type === "error") {
             streamError = new AcpRuntimeError(
               normalizeAcpErrorCode(event.code),
@@ -680,6 +752,15 @@ export class AcpSessionManager {
         if (streamError) {
           throw streamError;
         }
+        if (activeTurn.terminationReason === "timeout") {
+          throw new AcpRuntimeError(
+            "ACP_TURN_FAILED",
+            formatAcpTurnTimeoutMessage(turnTimeoutMs ?? 0),
+          );
+        }
+        if (activeTurn.terminationReason === "caller-abort" && !sawDone) {
+          throw new AcpRuntimeError("ACP_TURN_FAILED", "ACP turn aborted before completion.");
+        }
         this.recordTurnCompletion({
           startedAt: turnStartedAt,
         });
@@ -690,11 +771,34 @@ export class AcpSessionManager {
           clearLastError: true,
         });
       } catch (error) {
-        const acpError = toAcpRuntimeError({
-          error,
-          fallbackCode: "ACP_TURN_FAILED",
-          fallbackMessage: "ACP turn failed before completion.",
-        });
+        if (activeTurn.terminationReason === "cancel" && isAbortLikeError(error)) {
+          this.recordTurnCompletion({
+            startedAt: turnStartedAt,
+          });
+          await this.setSessionState({
+            cfg: input.cfg,
+            sessionKey,
+            state: "idle",
+            clearLastError: true,
+          });
+          return;
+        }
+        const acpError =
+          activeTurn.terminationReason === "timeout"
+            ? new AcpRuntimeError(
+                "ACP_TURN_FAILED",
+                formatAcpTurnTimeoutMessage(turnTimeoutMs ?? 0),
+                { cause: error },
+              )
+            : activeTurn.terminationReason === "caller-abort" && isAbortLikeError(error)
+              ? new AcpRuntimeError("ACP_TURN_FAILED", "ACP turn aborted before completion.", {
+                  cause: error,
+                })
+              : toAcpRuntimeError({
+                  error,
+                  fallbackCode: "ACP_TURN_FAILED",
+                  fallbackMessage: "ACP turn failed before completion.",
+                });
         this.recordTurnCompletion({
           startedAt: turnStartedAt,
           errorCode: acpError.code,
@@ -707,6 +811,9 @@ export class AcpSessionManager {
         });
         throw acpError;
       } finally {
+        if (turnTimeoutTimer) {
+          clearTimeout(turnTimeoutTimer);
+        }
         if (input.signal) {
           input.signal.removeEventListener("abort", onCallerAbort);
         }
@@ -752,6 +859,7 @@ export class AcpSessionManager {
     const actorKey = normalizeActorKey(sessionKey);
     const activeTurn = this.activeTurnBySession.get(actorKey);
     if (activeTurn) {
+      activeTurn.terminationReason ??= "cancel";
       activeTurn.abortController.abort();
       if (!activeTurn.cancelPromise) {
         activeTurn.cancelPromise = activeTurn.runtime.cancel({

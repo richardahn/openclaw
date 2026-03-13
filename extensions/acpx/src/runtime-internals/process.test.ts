@@ -251,6 +251,20 @@ describe("waitForExit", () => {
     expect(exit.signal).toBeNull();
     expect(exit.error).toBeNull();
   });
+
+  it("terminates a running child when the wait signal aborts", async () => {
+    const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 10_000)"], {
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const controller = new AbortController();
+
+    setTimeout(() => {
+      controller.abort();
+    }, 10);
+
+    const exit = await waitForExit(child, { signal: controller.signal });
+    expect(exit.error?.name).toBe("AbortError");
+  });
 });
 
 describe("spawnAndCollect", () => {

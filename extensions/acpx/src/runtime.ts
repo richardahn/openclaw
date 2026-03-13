@@ -339,6 +339,7 @@ export class AcpxRuntime implements AcpRuntime {
       stderr += String(chunk);
     });
 
+    const exitPromise = waitForExit(child, { signal: input.signal });
     let sawDone = false;
     let sawError = false;
     const lines = createInterface({ input: child.stdout });
@@ -360,7 +361,7 @@ export class AcpxRuntime implements AcpRuntime {
         yield parsed;
       }
 
-      const exit = await waitForExit(child);
+      const exit = await exitPromise;
       if (exit.error) {
         const spawnFailure = resolveSpawnFailure(exit.error, state.cwd);
         if (spawnFailure === "missing-command") {

@@ -495,6 +495,49 @@ describe("AcpxRuntime", () => {
     expect(logs.some((entry) => entry.kind === "prompt")).toBe(false);
   });
 
+  it("cancels and tears down a wedged prompt when the turn signal aborts", async () => {
+    process.env.MOCK_ACPX_PROMPT_HANG = "1";
+    try {
+      const { runtime, logPath } = await createMockRuntimeFixture();
+      const handle = await runtime.ensureSession({
+        sessionKey: "agent:codex:acp:wedged",
+        agent: "codex",
+        mode: "persistent",
+      });
+      const controller = new AbortController();
+      const runPromise = (async () => {
+        const events = [];
+        for await (const event of runtime.runTurn({
+          handle,
+          text: "wedged prompt",
+          mode: "prompt",
+          requestId: "req-wedged",
+          signal: controller.signal,
+        })) {
+          events.push(event);
+        }
+        return events;
+      })();
+
+      await vi.waitFor(async () => {
+        const logs = await readMockRuntimeLogEntries(logPath);
+        expect(logs.some((entry) => entry.kind === "prompt")).toBe(true);
+      });
+      controller.abort();
+
+      await expect(runPromise).rejects.toMatchObject({
+        code: "ACP_TURN_FAILED",
+        message: "Operation aborted.",
+      });
+      await vi.waitFor(async () => {
+        const logs = await readMockRuntimeLogEntries(logPath);
+        expect(logs.some((entry) => entry.kind === "cancel")).toBe(true);
+      });
+    } finally {
+      delete process.env.MOCK_ACPX_PROMPT_HANG;
+    }
+  });
+
   it("does not mark backend unhealthy when a per-session cwd is missing", async () => {
     const { runtime } = await createMockRuntimeFixture();
     const missingCwd = path.join(os.tmpdir(), "openclaw-acpx-runtime-test-missing-cwd");

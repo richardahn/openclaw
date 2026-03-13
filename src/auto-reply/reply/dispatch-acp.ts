@@ -197,6 +197,8 @@ export async function tryDispatchAcpReply(params: {
   originatingTo?: string;
   shouldSendToolSummaries: boolean;
   bypassForCommand: boolean;
+  abortSignal?: AbortSignal;
+  timeoutMs?: number;
   onReplyStart?: () => Promise<void> | void;
   recordProcessed: DispatchProcessedRecorder;
   markIdle: (reason: string) => void;
@@ -308,6 +310,8 @@ export async function tryDispatchAcpReply(params: {
       attachments: attachments.length > 0 ? attachments : undefined,
       mode: "prompt",
       requestId: resolveAcpRequestId(params.ctx),
+      signal: params.abortSignal,
+      timeoutMs: params.timeoutMs,
       onEvent: async (event) => await projector.onEvent(event),
     });
 

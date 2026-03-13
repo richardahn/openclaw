@@ -761,6 +761,7 @@ async function agentCommandInternal(
           mode: "prompt",
           requestId: runId,
           signal: opts.abortSignal,
+          timeoutMs,
           onEvent: (event) => {
             if (event.type === "done") {
               stopReason = event.stopReason;

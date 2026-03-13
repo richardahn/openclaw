@@ -135,6 +135,8 @@ async function runDispatch(params: {
   shouldRouteToOriginating?: boolean;
   onReplyStart?: () => void;
   ctxOverrides?: Record<string, unknown>;
+  abortSignal?: AbortSignal;
+  timeoutMs?: number;
 }) {
   return tryDispatchAcpReply({
     ctx: buildTestCtx({
@@ -154,6 +156,8 @@ async function runDispatch(params: {
       : {}),
     shouldSendToolSummaries: true,
     bypassForCommand: false,
+    ...(params.abortSignal ? { abortSignal: params.abortSignal } : {}),
+    ...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs } : {}),
     ...(params.onReplyStart ? { onReplyStart: params.onReplyStart } : {}),
     recordProcessed: vi.fn(),
     markIdle: vi.fn(),
@@ -341,6 +345,25 @@ describe("tryDispatchAcpReply", () => {
     await dispatchVisibleTurn(onReplyStart);
 
     expect(onReplyStart).toHaveBeenCalledTimes(1);
+  });
+
+  it("forwards ACP abort and timeout controls into the manager turn", async () => {
+    setReadyAcpResolution();
+    const controller = new AbortController();
+    managerMocks.runTurn.mockResolvedValue(undefined);
+
+    await runDispatch({
+      bodyForAgent: "reply",
+      abortSignal: controller.signal,
+      timeoutMs: 45_000,
+    });
+
+    expect(managerMocks.runTurn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        signal: controller.signal,
+        timeoutMs: 45_000,
+      }),
+    );
   });
 
   it("does not start reply lifecycle for empty ACP prompt", async () => {

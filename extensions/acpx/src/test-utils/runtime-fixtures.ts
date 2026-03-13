@@ -209,6 +209,11 @@ if (command === "prompt") {
   });
   const requestId = "req-1";
 
+  if (process.env.MOCK_ACPX_PROMPT_HANG === "1") {
+    setInterval(() => {}, 1_000);
+    return;
+  }
+
   emitJson({
     jsonrpc: "2.0",
     id: 0,
@@ -382,6 +387,7 @@ export async function readMockRuntimeLogEntries(
 export async function cleanupMockRuntimeFixtures(): Promise<void> {
   delete process.env.MOCK_ACPX_LOG;
   delete process.env.MOCK_ACPX_CONFIG_SHOW_AGENTS;
+  delete process.env.MOCK_ACPX_PROMPT_HANG;
   sharedMockCliScriptPath = null;
   logFileSequence = 0;
   while (tempDirs.length > 0) {

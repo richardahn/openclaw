@@ -725,6 +725,60 @@ describe("AcpSessionManager", () => {
     expect(states).not.toContain("error");
   });
 
+  it("times out wedged turns and records an ACP timeout error", async () => {
+    const runtimeState = createRuntime();
+    hoisted.requireAcpRuntimeBackendMock.mockReturnValue({
+      id: "acpx",
+      runtime: runtimeState.runtime,
+    });
+    hoisted.readAcpSessionEntryMock.mockReturnValue({
+      sessionKey: "agent:codex:acp:session-1",
+      storeSessionKey: "agent:codex:acp:session-1",
+      acp: readySessionMeta(),
+    });
+
+    let sawAbort = false;
+    runtimeState.runTurn.mockImplementation(async function* (input: { signal?: AbortSignal }) {
+      await new Promise<void>((resolve) => {
+        if (input.signal?.aborted) {
+          sawAbort = true;
+          resolve();
+          return;
+        }
+        input.signal?.addEventListener(
+          "abort",
+          () => {
+            sawAbort = true;
+            resolve();
+          },
+          { once: true },
+        );
+      });
+      yield* [];
+    });
+
+    const manager = new AcpSessionManager();
+    await expect(
+      manager.runTurn({
+        cfg: baseCfg,
+        sessionKey: "agent:codex:acp:session-1",
+        text: "wedged task",
+        mode: "prompt",
+        requestId: "run-timeout",
+        timeoutMs: 20,
+      }),
+    ).rejects.toMatchObject({
+      code: "ACP_TURN_FAILED",
+      message: expect.stringContaining("timed out"),
+    });
+
+    expect(sawAbort).toBe(true);
+    const states = extractStatesFromUpserts();
+    expect(states).toContain("running");
+    expect(states).toContain("error");
+    expect(states.at(-1)).toBe("error");
+  });
+
   it("cleans actor-tail bookkeeping after session turns complete", async () => {
     const runtimeState = createRuntime();
     hoisted.requireAcpRuntimeBackendMock.mockReturnValue({
