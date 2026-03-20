@@ -49,7 +49,7 @@ export async function recordInboundSession(params: {
 }): Promise<void> {
   const { storePath, sessionKey, ctx, groupResolution, createIfMissing } = params;
   const canonicalSessionKey = normalizeSessionStoreKey(sessionKey);
-  void recordSessionMetaFromInbound({
+  await recordSessionMetaFromInbound({
     storePath,
     sessionKey: canonicalSessionKey,
     ctx,

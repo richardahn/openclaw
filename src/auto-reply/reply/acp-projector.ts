@@ -172,6 +172,7 @@ export function createAcpReplyProjector(params: {
     payload: ReplyPayload,
     meta?: AcpProjectedDeliveryMeta,
   ) => Promise<boolean>;
+  onVisibleOutput?: (text: string) => Promise<void> | void;
   provider?: string;
   accountId?: string;
 }): AcpReplyProjector {
@@ -199,6 +200,7 @@ export function createAcpReplyProjector(params: {
   let lastStatusHash: string | undefined;
   let lastToolHash: string | undefined;
   let lastUsageTuple: string | undefined;
+  let projectedVisibleOutputText = "";
   let lastVisibleOutputTail: string | undefined;
   let pendingHiddenBoundary = false;
   let liveBufferText = "";
@@ -267,6 +269,7 @@ export function createAcpReplyProjector(params: {
     lastStatusHash = undefined;
     lastToolHash = undefined;
     lastUsageTuple = undefined;
+    projectedVisibleOutputText = "";
     lastVisibleOutputTail = undefined;
     pendingHiddenBoundary = false;
     liveBufferText = "";
@@ -432,7 +435,9 @@ export function createAcpReplyProjector(params: {
       const accepted = remaining < text.length ? text.slice(0, remaining) : text;
       if (accepted.length > 0) {
         emittedOutputChars += accepted.length;
+        projectedVisibleOutputText += accepted;
         lastVisibleOutputTail = accepted.slice(-1);
+        await params.onVisibleOutput?.(projectedVisibleOutputText);
         if (settings.deliveryMode === "live") {
           liveBufferText += accepted;
           if (shouldFlushLiveBufferOnBoundary(liveBufferText)) {

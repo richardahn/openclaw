@@ -779,6 +779,149 @@ describe("AcpSessionManager", () => {
     expect(states.at(-1)).toBe("error");
   });
 
+  it("retries retryable runtime errors before any user-facing output", async () => {
+    const runtimeState = createRuntime();
+    hoisted.requireAcpRuntimeBackendMock.mockReturnValue({
+      id: "acpx",
+      runtime: runtimeState.runtime,
+    });
+    hoisted.readAcpSessionEntryMock.mockReturnValue({
+      sessionKey: "agent:codex:acp:session-1",
+      storeSessionKey: "agent:codex:acp:session-1",
+      acp: readySessionMeta(),
+    });
+
+    let attempt = 0;
+    runtimeState.runTurn.mockImplementation(async function* () {
+      attempt += 1;
+      if (attempt === 1) {
+        yield {
+          type: "status" as const,
+          text: "warming queue owner",
+        };
+        yield {
+          type: "error" as const,
+          message: "Queue owner disconnected before responding",
+          retryable: true,
+        };
+        return;
+      }
+      yield {
+        type: "text_delta" as const,
+        text: "recovered",
+        stream: "output" as const,
+      };
+      yield { type: "done" as const };
+    });
+
+    const manager = new AcpSessionManager();
+    const events: Array<{ type: string; text?: string; message?: string }> = [];
+    await expect(
+      manager.runTurn({
+        cfg: baseCfg,
+        sessionKey: "agent:codex:acp:session-1",
+        text: "recover",
+        mode: "prompt",
+        requestId: "run-retry",
+        onEvent: async (event) => {
+          events.push({
+            type: event.type,
+            ...("text" in event ? { text: event.text } : {}),
+            ...("message" in event ? { message: event.message } : {}),
+          });
+        },
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(runtimeState.ensureSession).toHaveBeenCalledTimes(2);
+    expect(runtimeState.runTurn).toHaveBeenCalledTimes(2);
+    expect(events).toEqual([
+      {
+        type: "status",
+        text: "warming queue owner",
+      },
+      {
+        type: "text_delta",
+        text: "recovered",
+      },
+      {
+        type: "done",
+      },
+    ]);
+    const states = extractStatesFromUpserts();
+    expect(states).toContain("running");
+    expect(states).toContain("idle");
+    expect(states).not.toContain("error");
+  });
+
+  it("does not retry retryable runtime errors after output has started", async () => {
+    const runtimeState = createRuntime();
+    hoisted.requireAcpRuntimeBackendMock.mockReturnValue({
+      id: "acpx",
+      runtime: runtimeState.runtime,
+    });
+    hoisted.readAcpSessionEntryMock.mockReturnValue({
+      sessionKey: "agent:codex:acp:session-1",
+      storeSessionKey: "agent:codex:acp:session-1",
+      acp: readySessionMeta(),
+    });
+
+    runtimeState.runTurn.mockImplementation(async function* () {
+      yield {
+        type: "text_delta" as const,
+        text: "partial",
+        stream: "output" as const,
+      };
+      yield {
+        type: "error" as const,
+        message: "Queue owner disconnected before prompt completion",
+        retryable: true,
+      };
+    });
+
+    const manager = new AcpSessionManager();
+    const events: Array<{ type: string; text?: string; message?: string; retryable?: boolean }> =
+      [];
+    await expect(
+      manager.runTurn({
+        cfg: baseCfg,
+        sessionKey: "agent:codex:acp:session-1",
+        text: "partial output",
+        mode: "prompt",
+        requestId: "run-no-retry",
+        onEvent: async (event) => {
+          events.push({
+            type: event.type,
+            ...("text" in event ? { text: event.text } : {}),
+            ...("message" in event ? { message: event.message } : {}),
+            ...(event.type === "error" ? { retryable: event.retryable } : {}),
+          });
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: "ACP_TURN_FAILED",
+      message: "Queue owner disconnected before prompt completion",
+    });
+
+    expect(runtimeState.ensureSession).toHaveBeenCalledTimes(1);
+    expect(runtimeState.runTurn).toHaveBeenCalledTimes(1);
+    expect(events).toEqual([
+      {
+        type: "text_delta",
+        text: "partial",
+      },
+      {
+        type: "error",
+        message: "Queue owner disconnected before prompt completion",
+        retryable: true,
+      },
+    ]);
+    const states = extractStatesFromUpserts();
+    expect(states).toContain("running");
+    expect(states).toContain("error");
+    expect(states.at(-1)).toBe("error");
+  });
+
   it("cleans actor-tail bookkeeping after session turns complete", async () => {
     const runtimeState = createRuntime();
     hoisted.requireAcpRuntimeBackendMock.mockReturnValue({

@@ -22,6 +22,33 @@ describe("recordInboundSession", () => {
     updateLastRouteMock.mockClear();
   });
 
+  it("waits for inbound metadata persistence before updating last route", async () => {
+    const { recordInboundSession } = await import("./session.js");
+    let resolveMeta: (() => void) | undefined;
+    recordSessionMetaFromInboundMock.mockReturnValueOnce(
+      new Promise<void>((resolve) => {
+        resolveMeta = resolve;
+      }),
+    );
+
+    const pending = recordInboundSession({
+      storePath: "/tmp/openclaw-session-store.json",
+      sessionKey: "agent:main:telegram:1234:thread:42",
+      ctx,
+      updateLastRoute: {
+        sessionKey: "agent:main:main",
+        channel: "telegram",
+        to: "telegram:1234",
+      },
+      onRecordError: vi.fn(),
+    });
+
+    expect(updateLastRouteMock).not.toHaveBeenCalled();
+    resolveMeta?.();
+    await pending;
+    expect(updateLastRouteMock).toHaveBeenCalledTimes(1);
+  });
+
   it("does not pass ctx when updating a different session key", async () => {
     const { recordInboundSession } = await import("./session.js");
 

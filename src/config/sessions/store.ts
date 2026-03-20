@@ -18,6 +18,7 @@ import {
 import { getFileStatSnapshot, isCacheEnabled, resolveCacheTtlMs } from "../cache-utils.js";
 import { enforceSessionDiskBudget, type SessionDiskBudgetSweepResult } from "./disk-budget.js";
 import { deriveSessionMetaPatch } from "./metadata.js";
+import { resolveSessionFilePath, resolveSessionFilePathOptions } from "./paths.js";
 import {
   clearSessionStoreCaches,
   dropSessionStoreObjectCache,
@@ -762,6 +763,7 @@ export async function recordSessionMetaFromInbound(params: {
 }): Promise<SessionEntry | null> {
   const { storePath, sessionKey, ctx } = params;
   const createIfMissing = params.createIfMissing ?? true;
+  const sessionFilePathOptions = resolveSessionFilePathOptions({ storePath });
   return await updateSessionStore(
     storePath,
     (store) => {
@@ -785,11 +787,20 @@ export async function recordSessionMetaFromInbound(params: {
       if (!existing && !createIfMissing) {
         return null;
       }
-      const next = existing
+      const merged = existing
         ? // Inbound metadata updates must not refresh activity timestamps;
           // idle reset evaluation relies on updatedAt from actual session turns.
           mergeSessionEntryPreserveActivity(existing, patch)
         : mergeSessionEntry(existing, patch);
+      const normalizedSessionFile = resolveSessionFilePath(
+        merged.sessionId,
+        merged,
+        sessionFilePathOptions,
+      );
+      const next =
+        merged.sessionFile === normalizedSessionFile
+          ? merged
+          : { ...merged, sessionFile: normalizedSessionFile };
       store[resolved.normalizedKey] = next;
       for (const legacyKey of resolved.legacyKeys) {
         delete store[legacyKey];

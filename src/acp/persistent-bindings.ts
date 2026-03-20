@@ -11,6 +11,7 @@ export {
 } from "./persistent-bindings.types.js";
 export {
   ensureConfiguredAcpBindingSession,
+  reconcileConfiguredAcpBindingSessions,
   resetAcpSessionInPlace,
 } from "./persistent-bindings.lifecycle.js";
 export {

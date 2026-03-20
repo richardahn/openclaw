@@ -18,6 +18,7 @@ import {
 import type {
   AcpRuntime,
   AcpRuntimeCapabilities,
+  AcpRuntimeEvent,
   AcpRuntimeHandle,
   AcpRuntimeStatus,
 } from "../runtime/types.js";
@@ -70,6 +71,7 @@ import {
 import { SessionActorQueue } from "./session-actor-queue.js";
 
 const ACP_NO_TIMEOUT_MS = 2_147_000_000;
+const MAX_RETRYABLE_TURN_RECOVERY_ATTEMPTS = 1;
 
 function isAbortLikeError(error: unknown): boolean {
   if (error instanceof Error && error.name === "AbortError") {
@@ -120,6 +122,28 @@ function formatAcpTurnTimeoutMessage(timeoutMs: number): string {
       ? `${(normalized / 1000).toFixed(normalized % 1000 === 0 ? 0 : 1)}s`
       : `${normalized}ms`;
   return `ACP turn timed out after ${duration}; cancel requested to unblock the session.`;
+}
+
+function isUserFacingTurnEvent(event: AcpRuntimeEvent): boolean {
+  return event.type === "text_delta" || event.type === "tool_call";
+}
+
+function shouldRetryRuntimeTurnError(params: {
+  event: Extract<AcpRuntimeEvent, { type: "error" }>;
+  mode: SessionAcpMeta["mode"];
+  attempt: number;
+  sawDone: boolean;
+  sawUserFacingOutput: boolean;
+  terminationReason: ActiveTurnState["terminationReason"];
+}): boolean {
+  return (
+    params.mode === "persistent" &&
+    params.event.retryable === true &&
+    !params.sawDone &&
+    !params.sawUserFacingOutput &&
+    params.terminationReason == null &&
+    params.attempt <= MAX_RETRYABLE_TURN_RECOVERY_ATTEMPTS
+  );
 }
 
 export class AcpSessionManager {
@@ -662,17 +686,11 @@ export class AcpSessionManager {
       });
       const resolvedMeta = requireReadySessionMeta(resolution);
 
-      const {
-        runtime,
-        handle: ensuredHandle,
-        meta: ensuredMeta,
-      } = await this.ensureRuntimeHandle({
+      let { runtime, handle, meta } = await this.ensureRuntimeHandle({
         cfg: input.cfg,
         sessionKey,
         meta: resolvedMeta,
       });
-      let handle = ensuredHandle;
-      const meta = ensuredMeta;
       await this.applyRuntimeControls({
         sessionKey,
         runtime,
@@ -728,26 +746,73 @@ export class AcpSessionManager {
           input.signal && typeof AbortSignal.any === "function"
             ? AbortSignal.any([input.signal, internalAbortController.signal])
             : internalAbortController.signal;
-        for await (const event of runtime.runTurn({
-          handle,
-          text: input.text,
-          attachments: input.attachments,
-          mode: input.mode,
-          requestId: input.requestId,
-          signal: combinedSignal,
-        })) {
-          if (event.type === "done") {
-            sawDone = true;
+        let attempt = 0;
+        while (true) {
+          attempt += 1;
+          let sawUserFacingOutput = false;
+          let shouldRetryTurn = false;
+          for await (const event of runtime.runTurn({
+            handle,
+            text: input.text,
+            attachments: input.attachments,
+            mode: input.mode,
+            requestId: input.requestId,
+            signal: combinedSignal,
+          })) {
+            if (event.type === "done") {
+              sawDone = true;
+            }
+            if (isUserFacingTurnEvent(event)) {
+              sawUserFacingOutput = true;
+            }
+            if (event.type === "error") {
+              if (
+                shouldRetryRuntimeTurnError({
+                  event,
+                  mode: meta.mode,
+                  attempt,
+                  sawDone,
+                  sawUserFacingOutput,
+                  terminationReason: activeTurn.terminationReason,
+                })
+              ) {
+                logVerbose(
+                  `acp-manager: retrying retryable runtime turn error for ${sessionKey}: ${event.message}`,
+                );
+                shouldRetryTurn = true;
+                break;
+              }
+              streamError = new AcpRuntimeError(
+                normalizeAcpErrorCode(event.code),
+                event.message?.trim() || "ACP turn failed before completion.",
+              );
+            }
+            if (input.onEvent) {
+              await input.onEvent(event);
+            }
           }
-          if (event.type === "error") {
-            streamError = new AcpRuntimeError(
-              normalizeAcpErrorCode(event.code),
-              event.message?.trim() || "ACP turn failed before completion.",
-            );
+          if (!shouldRetryTurn) {
+            break;
           }
-          if (input.onEvent) {
-            await input.onEvent(event);
-          }
+          this.clearCachedRuntimeState(sessionKey);
+          const retryResolution = this.resolveSession({
+            cfg: input.cfg,
+            sessionKey,
+          });
+          const retryMeta = requireReadySessionMeta(retryResolution);
+          ({ runtime, handle, meta } = await this.ensureRuntimeHandle({
+            cfg: input.cfg,
+            sessionKey,
+            meta: retryMeta,
+          }));
+          activeTurn.runtime = runtime;
+          activeTurn.handle = handle;
+          await this.applyRuntimeControls({
+            sessionKey,
+            runtime,
+            handle,
+            meta,
+          });
         }
         if (streamError) {
           throw streamError;

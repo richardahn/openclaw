@@ -9,7 +9,11 @@ import {
   normalizeText,
   type ConfiguredAcpBindingSpec,
 } from "./persistent-bindings.types.js";
-import { readAcpSessionEntry } from "./runtime/session-meta.js";
+import {
+  ensureAcpSessionTranscript,
+  listAcpSessionEntries,
+  readAcpSessionEntry,
+} from "./runtime/session-meta.js";
 
 function sessionMatchesConfiguredBinding(params: {
   cfg: OpenClawConfig;
@@ -44,6 +48,20 @@ function sessionMatchesConfiguredBinding(params: {
   return true;
 }
 
+async function selfHealConfiguredAcpBindingSession(params: {
+  cfg: OpenClawConfig;
+  sessionKey: string;
+}): Promise<void> {
+  await ensureAcpSessionTranscript({
+    cfg: params.cfg,
+    sessionKey: params.sessionKey,
+  });
+  await getAcpSessionManager().getSessionStatus({
+    cfg: params.cfg,
+    sessionKey: params.sessionKey,
+  });
+}
+
 export async function ensureConfiguredAcpBindingSession(params: {
   cfg: OpenClawConfig;
   spec: ConfiguredAcpBindingSpec;
@@ -63,6 +81,10 @@ export async function ensureConfiguredAcpBindingSession(params: {
         meta: resolution.meta,
       })
     ) {
+      await selfHealConfiguredAcpBindingSession({
+        cfg: params.cfg,
+        sessionKey,
+      });
       return {
         ok: true,
         sessionKey,
@@ -104,6 +126,51 @@ export async function ensureConfiguredAcpBindingSession(params: {
       error: message,
     };
   }
+}
+
+export async function reconcileConfiguredAcpBindingSessions(params: {
+  cfg: OpenClawConfig;
+}): Promise<{ checked: number; healed: number; failed: number }> {
+  let checked = 0;
+  let healed = 0;
+  let failed = 0;
+
+  const sessions = await listAcpSessionEntries({
+    cfg: params.cfg,
+  });
+  const seenSessionKeys = new Set<string>();
+
+  for (const session of sessions) {
+    const sessionKey = session.sessionKey?.trim();
+    if (!sessionKey || seenSessionKeys.has(sessionKey)) {
+      continue;
+    }
+    const configuredBinding = resolveConfiguredAcpBindingSpecBySessionKey({
+      cfg: params.cfg,
+      sessionKey,
+    });
+    if (!configuredBinding) {
+      continue;
+    }
+    seenSessionKeys.add(sessionKey);
+    checked += 1;
+
+    const ensured = await ensureConfiguredAcpBindingSession({
+      cfg: params.cfg,
+      spec: configuredBinding,
+    });
+    if (ensured.ok) {
+      healed += 1;
+      continue;
+    }
+    failed += 1;
+  }
+
+  return {
+    checked,
+    healed,
+    failed,
+  };
 }
 
 export async function resetAcpSessionInPlace(params: {

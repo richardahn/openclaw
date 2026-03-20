@@ -356,9 +356,11 @@ export async function dispatchReplyFromConfig(params: {
       originatingTo,
       shouldSendToolSummaries,
       bypassForCommand: bypassAcpForCommand,
+      disableBlockStreaming: params.replyOptions?.disableBlockStreaming === true,
       abortSignal: params.replyOptions?.abortSignal,
       timeoutMs: acpDispatchTimeoutMs,
       onReplyStart: params.replyOptions?.onReplyStart,
+      onPartialReply: params.replyOptions?.onPartialReply,
       recordProcessed,
       markIdle,
     });
@@ -494,6 +496,7 @@ export async function dispatchReplyFromConfig(params: {
         abortSignal: params.replyOptions?.abortSignal,
         timeoutMs: acpDispatchTimeoutMs,
         onReplyStart: params.replyOptions?.onReplyStart,
+        onPartialReply: params.replyOptions?.onPartialReply,
         recordProcessed,
         markIdle,
       });

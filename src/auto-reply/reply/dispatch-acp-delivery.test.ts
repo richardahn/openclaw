@@ -26,7 +26,10 @@ function createDispatcher(): ReplyDispatcher {
   };
 }
 
-function createCoordinator(onReplyStart?: (...args: unknown[]) => Promise<void>) {
+function createCoordinator(params?: {
+  onReplyStart?: (...args: unknown[]) => Promise<void>;
+  suppressVisibleBlockReplies?: boolean;
+}) {
   return createAcpDispatchDeliveryCoordinator({
     cfg: createAcpTestConfig(),
     ctx: buildTestCtx({
@@ -37,14 +40,15 @@ function createCoordinator(onReplyStart?: (...args: unknown[]) => Promise<void>)
     dispatcher: createDispatcher(),
     inboundAudio: false,
     shouldRouteToOriginating: false,
-    ...(onReplyStart ? { onReplyStart } : {}),
+    ...(params?.onReplyStart ? { onReplyStart: params.onReplyStart } : {}),
+    ...(params?.suppressVisibleBlockReplies === true ? { suppressVisibleBlockReplies: true } : {}),
   });
 }
 
 describe("createAcpDispatchDeliveryCoordinator", () => {
   it("starts reply lifecycle only once when called directly and through deliver", async () => {
     const onReplyStart = vi.fn(async () => {});
-    const coordinator = createCoordinator(onReplyStart);
+    const coordinator = createCoordinator({ onReplyStart });
 
     await coordinator.startReplyLifecycle();
     await coordinator.deliver("final", { text: "hello" });
@@ -56,7 +60,7 @@ describe("createAcpDispatchDeliveryCoordinator", () => {
 
   it("starts reply lifecycle once when deliver triggers first", async () => {
     const onReplyStart = vi.fn(async () => {});
-    const coordinator = createCoordinator(onReplyStart);
+    const coordinator = createCoordinator({ onReplyStart });
 
     await coordinator.deliver("final", { text: "hello" });
     await coordinator.startReplyLifecycle();
@@ -66,10 +70,33 @@ describe("createAcpDispatchDeliveryCoordinator", () => {
 
   it("does not start reply lifecycle for empty payload delivery", async () => {
     const onReplyStart = vi.fn(async () => {});
-    const coordinator = createCoordinator(onReplyStart);
+    const coordinator = createCoordinator({ onReplyStart });
 
     await coordinator.deliver("final", {});
 
     expect(onReplyStart).not.toHaveBeenCalled();
+  });
+
+  it("can suppress visible ACP block replies while still accumulating final text", async () => {
+    const dispatcher = createDispatcher();
+    const coordinator = createAcpDispatchDeliveryCoordinator({
+      cfg: createAcpTestConfig(),
+      ctx: buildTestCtx({
+        Provider: "discord",
+        Surface: "discord",
+        SessionKey: "agent:codex-acp:session-1",
+      }),
+      dispatcher,
+      inboundAudio: false,
+      shouldRouteToOriginating: false,
+      suppressVisibleBlockReplies: true,
+    });
+
+    const delivered = await coordinator.deliver("block", { text: "Hello from ACP" });
+
+    expect(delivered).toBe(false);
+    expect(coordinator.getBlockCount()).toBe(1);
+    expect(coordinator.getAccumulatedBlockText()).toBe("Hello from ACP");
+    expect(dispatcher.sendBlockReply).not.toHaveBeenCalled();
   });
 });

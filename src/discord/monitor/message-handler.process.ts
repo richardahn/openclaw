@@ -26,6 +26,7 @@ import { resolveDiscordPreviewStreamMode } from "../../config/discord-preview-st
 import { resolveMarkdownTableMode } from "../../config/markdown-tables.js";
 import { readSessionUpdatedAt, resolveStorePath } from "../../config/sessions.js";
 import { danger, logVerbose, shouldLogVerbose } from "../../globals.js";
+import { formatDurationSeconds } from "../../infra/format-time/format-duration.ts";
 import { convertMarkdownTables } from "../../markdown/tables.js";
 import { getAgentScopedMediaLocalRoots } from "../../media/local-roots.js";
 import { buildAgentSessionKey } from "../../routing/resolve-route.js";
@@ -51,6 +52,7 @@ import {
 import { buildDirectLabel, buildGuildLabel, resolveReplyContext } from "./reply-context.js";
 import { deliverDiscordReply } from "./reply-delivery.js";
 import { resolveDiscordAutoThreadReplyPlan, resolveDiscordThreadStarter } from "./threading.js";
+import { isDiscordInboundWorkerTimeoutAbortReason, resolveAbortReason } from "./timeouts.js";
 import { sendTyping } from "./typing.js";
 
 function sleep(ms: number): Promise<void> {
@@ -63,6 +65,21 @@ const DISCORD_TYPING_MAX_DURATION_MS = 20 * 60_000;
 
 function isProcessAborted(abortSignal?: AbortSignal): boolean {
   return Boolean(abortSignal?.aborted);
+}
+
+function resolveDiscordInboundWorkerTimeoutText(timeoutMs: number): string {
+  return `⚠️ This Discord turn stopped after ${formatDurationSeconds(timeoutMs, {
+    decimals: 1,
+    unit: "seconds",
+  })} because the inbound worker hit its timeout before the agent finished. Retry the message if you still want the result.`;
+}
+
+function resolveDiscordInboundWorkerTimeoutReason(signal?: AbortSignal) {
+  const reason = resolveAbortReason(signal);
+  if (!isDiscordInboundWorkerTimeoutAbortReason(reason)) {
+    return undefined;
+  }
+  return reason;
 }
 
 export async function processDiscordMessage(ctx: DiscordMessagePreflightContext) {
@@ -465,6 +482,8 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
         rest: client.rest,
         channelId: deliverChannelId,
         maxChars: draftMaxChars,
+        maxLines: maxLinesPerMessage,
+        chunkMode,
         replyToMessageId: draftReplyToMessageId,
         minInitialChars: 30,
         throttleMs: 1200,
@@ -483,7 +502,12 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
   let hasStreamedMessage = false;
   let finalizedViaPreviewMessage = false;
 
-  const resolvePreviewFinalText = (text?: string) => {
+  const currentPreviewText = () => (discordStreamMode === "block" ? draftText : lastPartialText);
+
+  const resolveSinglePreviewMessageText = (
+    text?: string,
+    opts?: { allowShorterThanCurrent?: boolean },
+  ) => {
     if (typeof text !== "string") {
       return undefined;
     }
@@ -503,16 +527,19 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
     if (!trimmed) {
       return undefined;
     }
-    const currentPreviewText = discordStreamMode === "block" ? draftText : lastPartialText;
+    const previewText = currentPreviewText();
     if (
-      currentPreviewText &&
-      currentPreviewText.startsWith(trimmed) &&
-      trimmed.length < currentPreviewText.length
+      !opts?.allowShorterThanCurrent &&
+      previewText &&
+      previewText.startsWith(trimmed) &&
+      trimmed.length < previewText.length
     ) {
       return undefined;
     }
     return trimmed;
   };
+
+  const resolvePreviewFinalText = (text?: string) => resolveSinglePreviewMessageText(text);
 
   const updateDraftFromPartial = (text?: string) => {
     if (!draftStream || !text) {
@@ -588,6 +615,71 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
     await draftStream.flush();
   };
 
+  const finalizeAbortedDiscordRun = async () => {
+    const timeoutReason = resolveDiscordInboundWorkerTimeoutReason(abortSignal);
+    if (!timeoutReason) {
+      return { handled: false, preservePreview: false };
+    }
+
+    const timeoutText = resolveDiscordInboundWorkerTimeoutText(timeoutReason.timeoutMs);
+    const previewShown = draftStream?.hasVisibleMessages() ?? false;
+    const previewMessageId = draftStream?.messageId();
+    const previewTimeoutText = resolveSinglePreviewMessageText(
+      currentPreviewText().trim()
+        ? `${currentPreviewText().trim()}\n\n${timeoutText}`
+        : timeoutText,
+      { allowShorterThanCurrent: true },
+    );
+
+    if (
+      previewShown &&
+      typeof previewMessageId === "string" &&
+      typeof previewTimeoutText === "string"
+    ) {
+      try {
+        await editMessageDiscord(
+          deliverChannelId,
+          previewMessageId,
+          { content: previewTimeoutText },
+          { rest: client.rest },
+        );
+        finalizedViaPreviewMessage = true;
+        replyReference.markSent();
+        return { handled: true, preservePreview: false };
+      } catch (err) {
+        logVerbose(
+          `discord: preview timeout finalization failed; falling back to standard send (${String(err)})`,
+        );
+      }
+    }
+
+    try {
+      await deliverDiscordReply({
+        cfg,
+        replies: [{ text: timeoutText, isError: true }],
+        target: deliverTarget,
+        token,
+        accountId,
+        rest: client.rest,
+        runtime,
+        replyToId: replyReference.use(),
+        replyToMode,
+        textLimit,
+        maxLinesPerMessage,
+        tableMode,
+        chunkMode,
+        sessionKey: ctxPayload.SessionKey,
+        threadBindings,
+        mediaLocalRoots,
+      });
+      replyReference.markSent();
+      return { handled: true, preservePreview: previewShown };
+    } catch (err) {
+      runtime.error?.(danger(`discord timeout finalization failed: ${String(err)}`));
+      return { handled: false, preservePreview: previewShown };
+    }
+  };
+
   // When draft streaming is active, suppress block streaming to avoid double-streaming.
   const disableBlockStreamingForDraft = draftStream ? true : undefined;
 
@@ -601,15 +693,19 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
           return;
         }
         const isFinal = info.kind === "final";
+        const isBlock = info.kind === "block";
+        const effectiveFinalText = payload.text;
+        const hasMedia = Boolean(payload.mediaUrl) || (payload.mediaUrls?.length ?? 0) > 0;
         if (payload.isReasoning) {
           // Reasoning/thinking payloads should not be delivered to Discord.
           return;
         }
+        if (draftStream && isBlock) {
+          await draftStream.clear();
+        }
         if (draftStream && isFinal) {
           await flushDraft();
-          const hasMedia = Boolean(payload.mediaUrl) || (payload.mediaUrls?.length ?? 0) > 0;
-          const finalText = payload.text;
-          const previewFinalText = resolvePreviewFinalText(finalText);
+          const previewFinalText = resolvePreviewFinalText(effectiveFinalText);
           const previewMessageId = draftStream.messageId();
 
           // Try to finalize via preview edit (text-only, fits in 2000 chars, not an error)
@@ -718,9 +814,14 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
   let dispatchResult: Awaited<ReturnType<typeof dispatchInboundMessage>> | null = null;
   let dispatchError = false;
   let dispatchAborted = false;
+  let dispatchAbortedByWorkerTimeout = false;
+  let preservePreviewAfterAbort = false;
   try {
     if (isProcessAborted(abortSignal)) {
       dispatchAborted = true;
+      dispatchAbortedByWorkerTimeout = Boolean(
+        resolveDiscordInboundWorkerTimeoutReason(abortSignal),
+      );
       return;
     }
     dispatchResult = await dispatchInboundMessage({
@@ -773,11 +874,17 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
     });
     if (isProcessAborted(abortSignal)) {
       dispatchAborted = true;
+      dispatchAbortedByWorkerTimeout = Boolean(
+        resolveDiscordInboundWorkerTimeoutReason(abortSignal),
+      );
       return;
     }
   } catch (err) {
     if (isProcessAborted(abortSignal)) {
       dispatchAborted = true;
+      dispatchAbortedByWorkerTimeout = Boolean(
+        resolveDiscordInboundWorkerTimeoutReason(abortSignal),
+      );
       return;
     }
     dispatchError = true;
@@ -786,7 +893,11 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
     try {
       // Must stop() first to flush debounced content before clear() wipes state.
       await draftStream?.stop();
-      if (!finalizedViaPreviewMessage) {
+      if (dispatchAbortedByWorkerTimeout) {
+        const abortFinalization = await finalizeAbortedDiscordRun();
+        preservePreviewAfterAbort = abortFinalization.preservePreview;
+      }
+      if (!finalizedViaPreviewMessage && !preservePreviewAfterAbort) {
         await draftStream?.clear();
       }
     } catch (err) {
@@ -797,21 +908,26 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
       markDispatchIdle();
     }
     if (statusReactionsEnabled) {
-      if (dispatchAborted) {
+      const treatAbortAsError = dispatchAborted && dispatchAbortedByWorkerTimeout;
+      if (dispatchAborted && !treatAbortAsError) {
         if (removeAckAfterReply) {
           void statusReactions.clear();
         } else {
           void statusReactions.restoreInitial();
         }
       } else {
-        if (dispatchError) {
+        if (dispatchError || treatAbortAsError) {
           await statusReactions.setError();
         } else {
           await statusReactions.setDone();
         }
         if (removeAckAfterReply) {
           void (async () => {
-            await sleep(dispatchError ? DEFAULT_TIMING.errorHoldMs : DEFAULT_TIMING.doneHoldMs);
+            await sleep(
+              dispatchError || treatAbortAsError
+                ? DEFAULT_TIMING.errorHoldMs
+                : DEFAULT_TIMING.doneHoldMs,
+            );
             await statusReactions.clear();
           })();
         } else {

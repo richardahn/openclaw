@@ -3,7 +3,7 @@ import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { resolvePreferredOpenClawTmpDir } from "../../../../src/infra/tmp-openclaw-dir.js";
 import type { ResolvedAcpxPluginConfig } from "../config.js";
-import { ACPX_PINNED_VERSION } from "../config.js";
+import { ACPX_PINNED_VERSION, DEFAULT_QUEUE_OWNER_TTL_SECONDS } from "../config.js";
 import { AcpxRuntime } from "../runtime.js";
 
 export const NOOP_LOGGER = {
@@ -19,6 +19,7 @@ let logFileSequence = 0;
 
 const MOCK_CLI_SCRIPT = String.raw`#!/usr/bin/env node
 const fs = require("node:fs");
+const path = require("node:path");
 
 const args = process.argv.slice(2);
 const logPath = process.env.MOCK_ACPX_LOG;
@@ -66,6 +67,11 @@ const readFlag = (flag) => {
 
 const sessionFromOption = readFlag("--session");
 const ensureName = readFlag("--name");
+const statusSessionFilter = String(process.env.MOCK_ACPX_STATUS_FOR || "");
+const forcedStatusState = String(process.env.MOCK_ACPX_STATUS_STATE || "");
+const forcedStatusPid = process.env.MOCK_ACPX_STATUS_PID
+  ? Number(process.env.MOCK_ACPX_STATUS_PID)
+  : undefined;
 const closeName =
   command === "sessions" && args[commandIndex + 1] === "close"
     ? String(args[commandIndex + 2] || "")
@@ -173,12 +179,24 @@ if (command === "set") {
 
 if (command === "status") {
   writeLog({ kind: "status", agent, args, sessionName: sessionFromOption });
+  const applyForcedStatus =
+    forcedStatusState && (!statusSessionFilter || statusSessionFilter === sessionFromOption);
+  const resolvedStatus = applyForcedStatus
+    ? forcedStatusState
+    : sessionFromOption
+      ? "alive"
+      : "no-session";
   emitJson({
     acpxRecordId: sessionFromOption ? "rec-" + sessionFromOption : null,
     acpxSessionId: sessionFromOption ? "sid-" + sessionFromOption : null,
     agentSessionId: sessionFromOption ? "inner-" + sessionFromOption : null,
-    status: sessionFromOption ? "alive" : "no-session",
-    pid: 4242,
+    status: resolvedStatus,
+    pid:
+      resolvedStatus === "no-session"
+        ? null
+        : forcedStatusPid !== undefined
+          ? forcedStatusPid
+          : 4242,
     uptime: 120,
   });
   process.exit(0);
@@ -196,13 +214,32 @@ if (command === "sessions" && args[commandIndex + 1] === "close") {
 }
 
 if (command === "prompt") {
-  const stdinText = fs.readFileSync(0, "utf8");
+  const promptFileFlag = readFlag("--file");
+  if (process.env.MOCK_ACPX_STDIN_HANG_ON_DASH === "1" && promptFileFlag === "-") {
+    setInterval(() => {}, 1_000);
+    return;
+  }
+  const promptFilePath =
+    promptFileFlag && promptFileFlag !== ""
+      ? promptFileFlag === "-"
+        ? "-"
+        : path.resolve(process.cwd(), promptFileFlag)
+      : "";
+  const promptFileExistsDuringRead =
+    promptFilePath && promptFilePath !== "-" ? fs.existsSync(promptFilePath) : false;
+  const stdinText =
+    promptFilePath && promptFilePath !== "-"
+      ? fs.readFileSync(promptFilePath, "utf8")
+      : fs.readFileSync(0, "utf8");
   writeLog({
     kind: "prompt",
     agent,
     args,
     sessionName: sessionFromOption,
     stdinText,
+    promptFilePath,
+    promptFileExistsDuringRead,
+    promptViaStdin: promptFilePath === "-" || promptFilePath === "",
     openclawShell,
     openaiApiKey: process.env.OPENAI_API_KEY || "",
     githubToken: process.env.GITHUB_TOKEN || "",
@@ -247,6 +284,16 @@ if (command === "prompt") {
       ],
     },
   });
+
+  if (stdinText.includes("trigger-retryable-error")) {
+    emitJson({
+      type: "error",
+      code: "QUEUE_OWNER_DISCONNECTED",
+      message: "queue owner disconnected",
+      retryable: true,
+    });
+    process.exit(1);
+  }
 
   if (stdinText.includes("trigger-error")) {
     emitJson({
@@ -339,7 +386,7 @@ export async function createMockRuntimeFixture(params?: {
     permissionMode: params?.permissionMode ?? "approve-all",
     nonInteractivePermissions: "fail",
     strictWindowsCmdWrapper: true,
-    queueOwnerTtlSeconds: params?.queueOwnerTtlSeconds ?? 0.1,
+    queueOwnerTtlSeconds: params?.queueOwnerTtlSeconds ?? DEFAULT_QUEUE_OWNER_TTL_SECONDS,
     mcpServers: params?.mcpServers ?? {},
   };
 
@@ -388,6 +435,7 @@ export async function cleanupMockRuntimeFixtures(): Promise<void> {
   delete process.env.MOCK_ACPX_LOG;
   delete process.env.MOCK_ACPX_CONFIG_SHOW_AGENTS;
   delete process.env.MOCK_ACPX_PROMPT_HANG;
+  delete process.env.MOCK_ACPX_STDIN_HANG_ON_DASH;
   sharedMockCliScriptPath = null;
   logFileSequence = 0;
   while (tempDirs.length > 0) {

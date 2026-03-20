@@ -51,11 +51,15 @@ type DispatchInboundParams = {
     onAssistantMessageStart?: () => Promise<void> | void;
   };
 };
-const dispatchInboundMessage = vi.fn(async (_params?: DispatchInboundParams) => ({
-  queuedFinal: false,
-  counts: { final: 0, tool: 0, block: 0 },
+const dispatchMocks = vi.hoisted(() => ({
+  dispatchInboundMessage: vi.fn(async (_params?: DispatchInboundParams) => ({
+    queuedFinal: false,
+    counts: { final: 0, tool: 0, block: 0 },
+  })),
+  recordInboundSession: vi.fn(async () => {}),
 }));
-const recordInboundSession = vi.fn(async () => {});
+const dispatchInboundMessage = dispatchMocks.dispatchInboundMessage;
+const recordInboundSession = dispatchMocks.recordInboundSession;
 const configSessionsMocks = vi.hoisted(() => ({
   readSessionUpdatedAt: vi.fn(() => undefined),
   resolveStorePath: vi.fn(() => "/tmp/openclaw-discord-process-test-sessions.json"),
@@ -81,20 +85,23 @@ vi.mock("./reply-delivery.js", () => ({
 }));
 
 vi.mock("../../auto-reply/dispatch.js", () => ({
-  dispatchInboundMessage,
+  dispatchInboundMessage: dispatchMocks.dispatchInboundMessage,
 }));
 
 vi.mock("../../auto-reply/reply/reply-dispatcher.js", () => ({
   createReplyDispatcherWithTyping: vi.fn(
     (opts: { deliver: (payload: unknown, info: { kind: string }) => Promise<void> | void }) => ({
       dispatcher: {
-        sendToolResult: vi.fn(() => true),
-        sendBlockReply: vi.fn((payload: unknown) => {
-          void opts.deliver(payload as never, { kind: "block" });
+        sendToolResult: vi.fn(async (payload: unknown) => {
+          await opts.deliver(payload as never, { kind: "tool" });
           return true;
         }),
-        sendFinalReply: vi.fn((payload: unknown) => {
-          void opts.deliver(payload as never, { kind: "final" });
+        sendBlockReply: vi.fn(async (payload: unknown) => {
+          await opts.deliver(payload as never, { kind: "block" });
+          return true;
+        }),
+        sendFinalReply: vi.fn(async (payload: unknown) => {
+          await opts.deliver(payload as never, { kind: "final" });
           return true;
         }),
         waitForIdle: vi.fn(async () => {}),
@@ -109,7 +116,7 @@ vi.mock("../../auto-reply/reply/reply-dispatcher.js", () => ({
 }));
 
 vi.mock("../../channels/session.js", () => ({
-  recordInboundSession,
+  recordInboundSession: dispatchMocks.recordInboundSession,
 }));
 
 vi.mock("../../config/sessions.js", () => ({
@@ -556,6 +563,26 @@ describe("processDiscordMessage draft streaming", () => {
     await processDiscordMessage(ctx as any);
 
     expect(deliverDiscordReply).not.toHaveBeenCalled();
+    expect(editMessageDiscord).not.toHaveBeenCalled();
+  });
+
+  it("clears the draft preview before delivering a visible block reply in preview mode", async () => {
+    const draftStream = createMockDraftStreamForTest();
+    dispatchInboundMessage.mockImplementationOnce(async (params?: DispatchInboundParams) => {
+      await params?.replyOptions?.onPartialReply?.({ text: "preview text" });
+      await params?.dispatcher.sendBlockReply({ text: "hello from block stream" });
+      return { queuedFinal: false, counts: { final: 0, tool: 0, block: 1 } };
+    });
+
+    await runInPartialStreamMode();
+
+    expect(draftStream.clear).toHaveBeenCalled();
+    expect(deliverDiscordReply).toHaveBeenCalledTimes(1);
+    expect(deliverDiscordReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        replies: [expect.objectContaining({ text: "hello from block stream" })],
+      }),
+    );
     expect(editMessageDiscord).not.toHaveBeenCalled();
   });
 

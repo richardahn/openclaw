@@ -3,10 +3,13 @@ import type { OpenClawConfig } from "../config/config.js";
 const managerMocks = vi.hoisted(() => ({
   resolveSession: vi.fn(),
   closeSession: vi.fn(),
+  getSessionStatus: vi.fn(),
   initializeSession: vi.fn(),
   updateSessionRuntimeOptions: vi.fn(),
 }));
 const sessionMetaMocks = vi.hoisted(() => ({
+  ensureAcpSessionTranscript: vi.fn(),
+  listAcpSessionEntries: vi.fn(),
   readAcpSessionEntry: vi.fn(),
 }));
 
@@ -14,17 +17,21 @@ vi.mock("./control-plane/manager.js", () => ({
   getAcpSessionManager: () => ({
     resolveSession: managerMocks.resolveSession,
     closeSession: managerMocks.closeSession,
+    getSessionStatus: managerMocks.getSessionStatus,
     initializeSession: managerMocks.initializeSession,
     updateSessionRuntimeOptions: managerMocks.updateSessionRuntimeOptions,
   }),
 }));
 vi.mock("./runtime/session-meta.js", () => ({
+  ensureAcpSessionTranscript: sessionMetaMocks.ensureAcpSessionTranscript,
+  listAcpSessionEntries: sessionMetaMocks.listAcpSessionEntries,
   readAcpSessionEntry: sessionMetaMocks.readAcpSessionEntry,
 }));
 
 import {
   buildConfiguredAcpSessionKey,
   ensureConfiguredAcpBindingSession,
+  reconcileConfiguredAcpBindingSessions,
   resetAcpSessionInPlace,
   resolveConfiguredAcpBindingRecord,
   resolveConfiguredAcpBindingSpecBySessionKey,
@@ -43,8 +50,15 @@ beforeEach(() => {
     runtimeClosed: true,
     metaCleared: true,
   });
+  managerMocks.getSessionStatus.mockReset().mockResolvedValue({
+    runtimeStatus: {
+      summary: "status=alive",
+    },
+  });
   managerMocks.initializeSession.mockReset().mockResolvedValue(undefined);
   managerMocks.updateSessionRuntimeOptions.mockReset().mockResolvedValue(undefined);
+  sessionMetaMocks.ensureAcpSessionTranscript.mockReset().mockResolvedValue(null);
+  sessionMetaMocks.listAcpSessionEntries.mockReset().mockResolvedValue([]);
   sessionMetaMocks.readAcpSessionEntry.mockReset().mockReturnValue(undefined);
 });
 
@@ -463,6 +477,14 @@ describe("ensureConfiguredAcpBindingSession", () => {
     });
 
     expect(ensured).toEqual({ ok: true, sessionKey });
+    expect(sessionMetaMocks.ensureAcpSessionTranscript).toHaveBeenCalledWith({
+      cfg: baseCfg,
+      sessionKey,
+    });
+    expect(managerMocks.getSessionStatus).toHaveBeenCalledWith({
+      cfg: baseCfg,
+      sessionKey,
+    });
     expect(managerMocks.closeSession).not.toHaveBeenCalled();
     expect(managerMocks.initializeSession).not.toHaveBeenCalled();
   });
@@ -527,6 +549,87 @@ describe("ensureConfiguredAcpBindingSession", () => {
     expect(managerMocks.initializeSession).toHaveBeenCalledWith(
       expect.objectContaining({
         agent: "codex",
+      }),
+    );
+  });
+});
+
+describe("reconcileConfiguredAcpBindingSessions", () => {
+  it("self-heals stored configured binding sessions on startup", async () => {
+    const discordSpec = {
+      channel: "discord" as const,
+      accountId: "default",
+      conversationId: "1478836151241412759",
+      agentId: "codex",
+      mode: "persistent" as const,
+    };
+    const discordSessionKey = buildConfiguredAcpSessionKey(discordSpec);
+    sessionMetaMocks.listAcpSessionEntries.mockResolvedValue([
+      {
+        sessionKey: discordSessionKey,
+        acp: {
+          backend: "acpx",
+          agent: "codex",
+          runtimeSessionName: "runtime:discord",
+          mode: "persistent",
+          state: "idle",
+          lastActivityAt: Date.now(),
+        },
+      },
+      {
+        sessionKey: "agent:codex:acp:ephemeral:123",
+        acp: {
+          backend: "acpx",
+          agent: "codex",
+          runtimeSessionName: "runtime:ephemeral",
+          mode: "persistent",
+          state: "idle",
+          lastActivityAt: Date.now(),
+        },
+      },
+    ]);
+    managerMocks.resolveSession.mockReturnValue({
+      kind: "ready",
+      sessionKey: discordSessionKey,
+      meta: {
+        backend: "acpx",
+        agent: "codex",
+        runtimeSessionName: "runtime:discord",
+        mode: "persistent",
+        state: "idle",
+        lastActivityAt: Date.now(),
+      },
+    });
+
+    const result = await reconcileConfiguredAcpBindingSessions({
+      cfg: {
+        ...baseCfg,
+        bindings: [
+          {
+            type: "acp",
+            agentId: "codex",
+            match: {
+              channel: "discord",
+              accountId: "default",
+              peer: { kind: "channel", id: "1478836151241412759" },
+            },
+            acp: {
+              mode: "persistent",
+            },
+          },
+        ],
+      } satisfies OpenClawConfig,
+    });
+
+    expect(result).toEqual({ checked: 1, healed: 1, failed: 0 });
+    expect(sessionMetaMocks.ensureAcpSessionTranscript).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionKey: discordSessionKey,
+      }),
+    );
+    expect(managerMocks.getSessionStatus).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionKey: discordSessionKey,
       }),
     );
   });

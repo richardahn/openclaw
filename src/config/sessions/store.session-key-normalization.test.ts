@@ -52,6 +52,7 @@ describe("session store key normalization", () => {
     const store = loadSessionStore(storePath, { skipCache: true });
     expect(Object.keys(store)).toEqual([CANONICAL_KEY]);
     expect(store[CANONICAL_KEY]?.origin?.provider).toBe("webchat");
+    expect(store[CANONICAL_KEY]?.sessionFile).toContain(`${store[CANONICAL_KEY]?.sessionId}.jsonl`);
   });
 
   it("does not create a duplicate mixed-case key when last route is updated", async () => {
@@ -144,5 +145,6 @@ describe("session store key normalization", () => {
     expect(store[CANONICAL_KEY]?.sessionId).toBe("existing-session");
     expect(store[CANONICAL_KEY]?.updatedAt).toBe(1111);
     expect(store[CANONICAL_KEY]?.origin?.provider).toBe("webchat");
+    expect(store[CANONICAL_KEY]?.sessionFile).toContain("existing-session.jsonl");
   });
 });

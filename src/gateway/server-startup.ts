@@ -1,4 +1,5 @@
 import { getAcpSessionManager } from "../acp/control-plane/manager.js";
+import { reconcileConfiguredAcpBindingSessions } from "../acp/persistent-bindings.js";
 import { ACP_SESSION_IDENTITY_RENDERER_VERSION } from "../acp/runtime/session-identifiers.js";
 import { DEFAULT_MODEL, DEFAULT_PROVIDER } from "../agents/defaults.js";
 import { loadModelCatalog } from "../agents/model-catalog.js";
@@ -162,19 +163,27 @@ export async function startGatewaySidecars(params: {
   }
 
   if (params.cfg.acp?.enabled) {
-    void getAcpSessionManager()
-      .reconcilePendingSessionIdentities({ cfg: params.cfg })
-      .then((result) => {
-        if (result.checked === 0) {
-          return;
-        }
-        params.log.warn(
-          `acp startup identity reconcile (renderer=${ACP_SESSION_IDENTITY_RENDERER_VERSION}): checked=${result.checked} resolved=${result.resolved} failed=${result.failed}`,
-        );
-      })
-      .catch((err) => {
-        params.log.warn(`acp startup identity reconcile failed: ${String(err)}`);
+    void (async () => {
+      const identityResult = await getAcpSessionManager().reconcilePendingSessionIdentities({
+        cfg: params.cfg,
       });
+      if (identityResult.checked > 0) {
+        params.log.warn(
+          `acp startup identity reconcile (renderer=${ACP_SESSION_IDENTITY_RENDERER_VERSION}): checked=${identityResult.checked} resolved=${identityResult.resolved} failed=${identityResult.failed}`,
+        );
+      }
+
+      const bindingResult = await reconcileConfiguredAcpBindingSessions({
+        cfg: params.cfg,
+      });
+      if (bindingResult.checked > 0) {
+        params.log.warn(
+          `acp startup configured binding reconcile: checked=${bindingResult.checked} healed=${bindingResult.healed} failed=${bindingResult.failed}`,
+        );
+      }
+    })().catch((err) => {
+      params.log.warn(`acp startup reconcile failed: ${String(err)}`);
+    });
   }
 
   void startGatewayMemoryBackend({ cfg: params.cfg, log: params.log }).catch((err) => {

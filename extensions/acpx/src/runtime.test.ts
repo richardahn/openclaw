@@ -1,8 +1,22 @@
+import { existsSync } from "node:fs";
+import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { runAcpRuntimeAdapterContract } from "../../../src/acp/runtime/adapter-contract.testkit.js";
+import { resolvePreferredOpenClawTmpDir } from "../../../src/infra/tmp-openclaw-dir.js";
+import { DEFAULT_QUEUE_OWNER_TTL_SECONDS } from "./config.js";
 import { AcpxRuntime, decodeAcpxRuntimeHandleState } from "./runtime.js";
+import {
+  createLoadableAcpAgentCommand,
+  DISCARD_ACPX_OUTPUT_FORMATTER,
+  isPidAlive,
+  loadAcpxQueueIpcExports,
+  loadAcpxSessionExports,
+  readAcpxSessionRecord,
+  waitForCondition,
+  waitForJsonFile,
+} from "./test-utils/acpx-reconnect-fixture.js";
 import {
   cleanupMockRuntimeFixtures,
   createMockRuntimeFixture,
@@ -25,7 +39,7 @@ beforeAll(async () => {
       permissionMode: "approve-reads",
       nonInteractivePermissions: "fail",
       strictWindowsCmdWrapper: true,
-      queueOwnerTtlSeconds: 0.1,
+      queueOwnerTtlSeconds: DEFAULT_QUEUE_OWNER_TTL_SECONDS,
       mcpServers: {},
     },
     { logger: NOOP_LOGGER },
@@ -58,7 +72,7 @@ describe("AcpxRuntime", () => {
   });
 
   it("ensures sessions and streams prompt events", async () => {
-    const { runtime, logPath } = await createMockRuntimeFixture({ queueOwnerTtlSeconds: 180 });
+    const { runtime, logPath } = await createMockRuntimeFixture({ queueOwnerTtlSeconds: 5 });
 
     const handle = await runtime.ensureSession({
       sessionKey: "agent:codex:acp:123",
@@ -124,8 +138,11 @@ describe("AcpxRuntime", () => {
     expect(Array.isArray(prompt?.args)).toBe(true);
     const promptArgs = (prompt?.args as string[]) ?? [];
     expect(promptArgs).toContain("--ttl");
-    expect(promptArgs).toContain("180");
+    expect(promptArgs).toContain("5");
     expect(promptArgs).toContain("--approve-all");
+    const promptFileFlagIndex = promptArgs.indexOf("--file");
+    expect(promptFileFlagIndex).toBeGreaterThanOrEqual(0);
+    expect(promptArgs[promptFileFlagIndex + 1]).not.toBe("-");
   });
 
   it("uses sessions new with --resume-session when resumeSessionId is provided", async () => {
@@ -185,6 +202,159 @@ describe("AcpxRuntime", () => {
       { type: "text", text: "describe this image" },
       { type: "image", mimeType: "image/png", data: "aW1hZ2UtYnl0ZXM=" },
     ]);
+  });
+
+  it("uses temp prompt files instead of stdin EOF transport", async () => {
+    process.env.MOCK_ACPX_STDIN_HANG_ON_DASH = "1";
+    try {
+      const { runtime, logPath } = await createMockRuntimeFixture();
+      const handle = await runtime.ensureSession({
+        sessionKey: "agent:codex:acp:temp-file-transport",
+        agent: "codex",
+        mode: "persistent",
+      });
+
+      const events = [];
+      for await (const event of runtime.runTurn({
+        handle,
+        text: "transport-check",
+        mode: "prompt",
+        requestId: "req-transport-check",
+      })) {
+        events.push(event);
+      }
+
+      expect(events).toContainEqual({
+        type: "done",
+        stopReason: "end_turn",
+      });
+
+      const logs = await readMockRuntimeLogEntries(logPath);
+      const prompt = logs.find(
+        (entry) =>
+          entry.kind === "prompt" &&
+          String(entry.sessionName ?? "") === "agent:codex:acp:temp-file-transport",
+      );
+      expect(prompt).toBeDefined();
+      expect(prompt?.promptViaStdin).toBe(false);
+      expect(prompt?.promptFileExistsDuringRead).toBe(true);
+      expect(String(prompt?.promptFilePath ?? "")).toContain(resolvePreferredOpenClawTmpDir());
+      expect(existsSync(String(prompt?.promptFilePath ?? ""))).toBe(false);
+    } finally {
+      delete process.env.MOCK_ACPX_STDIN_HANG_ON_DASH;
+    }
+  });
+
+  it("persists refreshed acpx session metadata before a queued prompt completes", async () => {
+    const originalHome = process.env.HOME;
+    const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-acpx-reconnect-"));
+    const fakeHome = path.join(tempRoot, "home");
+    const workspaceDir = path.join(tempRoot, "workspace");
+    await fs.mkdir(fakeHome, { recursive: true });
+    await fs.mkdir(workspaceDir, { recursive: true });
+    const { agentCommand, startedPath, releasePath, completedPath } =
+      createLoadableAcpAgentCommand(tempRoot);
+
+    process.env.HOME = fakeHome;
+
+    try {
+      const { createSession, closeSession, runSessionQueueOwner } = await loadAcpxSessionExports();
+      const { probeQueueOwnerHealth, trySubmitToRunningOwner } = await loadAcpxQueueIpcExports();
+      const created = (await createSession({
+        agentCommand,
+        cwd: workspaceDir,
+        name: "reconnect-regression",
+        permissionMode: "approve-reads",
+        nonInteractivePermissions: "deny",
+        authPolicy: "skip",
+        mcpServers: [],
+      })) as {
+        acpxRecordId: string;
+        pid?: number;
+      };
+
+      const recordId = created.acpxRecordId;
+      const originalRecord = await readAcpxSessionRecord<{
+        pid?: number;
+        last_prompt_at?: string;
+      }>(fakeHome, recordId);
+      expect(originalRecord.pid).toBeTypeOf("number");
+      await waitForCondition(() => !isPidAlive(originalRecord.pid), 10_000);
+
+      const ownerPromise = runSessionQueueOwner({
+        sessionId: recordId,
+        permissionMode: "approve-reads",
+        nonInteractivePermissions: "deny",
+        authPolicy: "skip",
+        suppressSdkConsoleErrors: true,
+        ttlMs: 1_000,
+        maxQueueDepth: 4,
+      });
+
+      let queuedResult: Record<string, unknown> | undefined;
+      await waitForCondition(async () => {
+        queuedResult = await trySubmitToRunningOwner({
+          sessionId: recordId,
+          message: "hold reconnect open",
+          prompt: [{ type: "text", text: "hold reconnect open" }],
+          permissionMode: "approve-reads",
+          nonInteractivePermissions: "deny",
+          outputFormatter: DISCARD_ACPX_OUTPUT_FORMATTER,
+          timeoutMs: 10_000,
+          suppressSdkConsoleErrors: true,
+          waitForCompletion: false,
+        });
+        return queuedResult != null;
+      }, 10_000);
+      expect(queuedResult).toMatchObject({ queued: true });
+
+      const started = await waitForJsonFile<{ pid: number; sessionId: string }>(
+        startedPath,
+        10_000,
+      );
+      expect(started.sessionId).toBe(recordId);
+
+      await waitForCondition(async () => {
+        const refreshed = await readAcpxSessionRecord<{
+          pid?: number;
+          closed?: boolean;
+          agent_started_at?: string;
+          last_prompt_at?: string;
+        }>(fakeHome, recordId);
+        return (
+          refreshed.pid === started.pid &&
+          refreshed.closed === false &&
+          typeof refreshed.agent_started_at === "string" &&
+          typeof refreshed.last_prompt_at === "string"
+        );
+      }, 10_000);
+
+      const refreshedRecord = await readAcpxSessionRecord<{
+        pid?: number;
+        closed?: boolean;
+        agent_started_at?: string;
+        last_prompt_at?: string;
+      }>(fakeHome, recordId);
+      expect(refreshedRecord.pid).toBe(started.pid);
+      expect(refreshedRecord.pid).not.toBe(originalRecord.pid);
+      expect(isPidAlive(refreshedRecord.pid)).toBe(true);
+      expect(refreshedRecord.closed).toBe(false);
+      expect(refreshedRecord.agent_started_at).toEqual(expect.any(String));
+      expect(refreshedRecord.last_prompt_at).toEqual(expect.any(String));
+
+      await fs.writeFile(releasePath, "release\n", "utf8");
+      await waitForJsonFile<{ pid: number; sessionId: string }>(completedPath, 10_000);
+      await waitForCondition(async () => !(await probeQueueOwnerHealth(recordId)).hasLease, 10_000);
+      await ownerPromise;
+      await closeSession(recordId);
+    } finally {
+      if (originalHome == null) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = originalHome;
+      }
+      await fs.rm(tempRoot, { recursive: true, force: true });
+    }
   });
 
   it("preserves provider auth env vars when runtime uses a custom acpx command", async () => {
@@ -260,7 +430,7 @@ describe("AcpxRuntime", () => {
     const promptArgs = (prompt?.args as string[]) ?? [];
     const ttlFlagIndex = promptArgs.indexOf("--ttl");
     expect(ttlFlagIndex).toBeGreaterThanOrEqual(0);
-    expect(promptArgs[ttlFlagIndex + 1]).toBe("0.1");
+    expect(promptArgs[ttlFlagIndex + 1]).toBe(String(DEFAULT_QUEUE_OWNER_TTL_SECONDS));
   });
 
   it("emits done once when ACP stream repeats stop reason responses", async () => {
@@ -316,6 +486,36 @@ describe("AcpxRuntime", () => {
       message: "mock failure",
       code: "-32000",
       retryable: undefined,
+    });
+  });
+
+  it("preserves retryable acpx error metadata for manager recovery", async () => {
+    const runtime = sharedFixture?.runtime;
+    expect(runtime).toBeDefined();
+    if (!runtime) {
+      throw new Error("shared runtime fixture missing");
+    }
+    const handle = await runtime.ensureSession({
+      sessionKey: "agent:codex:acp:retryable-error",
+      agent: "codex",
+      mode: "persistent",
+    });
+
+    const events = [];
+    for await (const event of runtime.runTurn({
+      handle,
+      text: "trigger-retryable-error",
+      mode: "prompt",
+      requestId: "req-retryable-err",
+    })) {
+      events.push(event);
+    }
+
+    expect(events).toContainEqual({
+      type: "error",
+      message: "queue owner disconnected",
+      code: "QUEUE_OWNER_DISCONNECTED",
+      retryable: true,
     });
   });
 
@@ -533,6 +733,14 @@ describe("AcpxRuntime", () => {
         const logs = await readMockRuntimeLogEntries(logPath);
         expect(logs.some((entry) => entry.kind === "cancel")).toBe(true);
       });
+
+      const logs = await readMockRuntimeLogEntries(logPath);
+      const prompt = logs.find(
+        (entry) =>
+          entry.kind === "prompt" && String(entry.sessionName ?? "") === "agent:codex:acp:wedged",
+      );
+      expect(prompt).toBeDefined();
+      expect(existsSync(String(prompt?.promptFilePath ?? ""))).toBe(false);
     } finally {
       delete process.env.MOCK_ACPX_PROMPT_HANG;
     }
@@ -622,6 +830,31 @@ describe("AcpxRuntime", () => {
       expect(logs.some((entry) => entry.kind === "new")).toBe(true);
     } finally {
       delete process.env.MOCK_ACPX_ENSURE_EMPTY;
+    }
+  });
+
+  it("recreates a stale ensured session when status reports a dead backend", async () => {
+    process.env.MOCK_ACPX_STATUS_FOR = "agent:claude:acp:stale-recreate";
+    process.env.MOCK_ACPX_STATUS_STATE = "dead";
+    try {
+      const { runtime, logPath } = await createMockRuntimeFixture();
+      const handle = await runtime.ensureSession({
+        sessionKey: "agent:claude:acp:stale-recreate",
+        agent: "claude",
+        mode: "persistent",
+      });
+
+      expect(handle.backend).toBe("acpx");
+      expect(handle.acpxRecordId).toBe("rec-agent:claude:acp:stale-recreate");
+
+      const logs = await readMockRuntimeLogEntries(logPath);
+      expect(logs.filter((entry) => entry.kind === "ensure")).toHaveLength(1);
+      expect(logs.filter((entry) => entry.kind === "status")).toHaveLength(1);
+      expect(logs.filter((entry) => entry.kind === "close")).toHaveLength(1);
+      expect(logs.filter((entry) => entry.kind === "new")).toHaveLength(1);
+    } finally {
+      delete process.env.MOCK_ACPX_STATUS_FOR;
+      delete process.env.MOCK_ACPX_STATUS_STATE;
     }
   });
 

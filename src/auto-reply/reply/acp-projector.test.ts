@@ -5,7 +5,10 @@ import { createAcpTestConfig as createCfg } from "./test-fixtures/acp-runtime.js
 
 type Delivery = { kind: string; text?: string };
 
-function createProjectorHarness(cfgOverrides?: Parameters<typeof createCfg>[0]) {
+function createProjectorHarness(
+  cfgOverrides?: Parameters<typeof createCfg>[0],
+  onVisibleOutput?: (text: string) => Promise<void> | void,
+) {
   const deliveries: Delivery[] = [];
   const projector = createAcpReplyProjector({
     cfg: createCfg(cfgOverrides),
@@ -14,6 +17,7 @@ function createProjectorHarness(cfgOverrides?: Parameters<typeof createCfg>[0]) 
       deliveries.push({ kind, text: payload.text });
       return true;
     },
+    onVisibleOutput,
   });
   return { deliveries, projector };
 }
@@ -189,6 +193,28 @@ describe("createAcpReplyProjector", () => {
       { kind: "block", text: "a".repeat(64) },
       { kind: "block", text: "a".repeat(6) },
     ]);
+  });
+
+  it("emits cumulative visible output before live block chunking splits delivery", async () => {
+    const onVisibleOutput = vi.fn();
+    const { deliveries, projector } = createProjectorHarness(
+      createLiveCfgOverrides({
+        coalesceIdleMs: 0,
+        maxChunkChars: 64,
+      }),
+      onVisibleOutput,
+    );
+    const firstChunk = `${"A".repeat(70)}. `;
+    const secondChunk = "Tail";
+
+    await projector.onEvent({ type: "text_delta", text: firstChunk, tag: "agent_message_chunk" });
+    await projector.onEvent({ type: "text_delta", text: secondChunk, tag: "agent_message_chunk" });
+    await projector.flush(true);
+
+    expect(onVisibleOutput).toHaveBeenCalledTimes(2);
+    expect(onVisibleOutput).toHaveBeenNthCalledWith(1, firstChunk);
+    expect(onVisibleOutput).toHaveBeenNthCalledWith(2, `${firstChunk}${secondChunk}`);
+    expect(blockDeliveries(deliveries).length).toBeGreaterThan(1);
   });
 
   it("does not suppress identical short text across terminal turn boundaries", async () => {

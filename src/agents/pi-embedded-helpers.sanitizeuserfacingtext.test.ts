@@ -74,6 +74,14 @@ describe("sanitizeUserFacingText", () => {
     );
   });
 
+  it("sanitizes Codex-prefixed raw API error payloads", () => {
+    const raw =
+      'Codex error: {"type":"error","error":{"message":"Something exploded","type":"server_error"}}';
+    expect(sanitizeUserFacingText(raw, { errorContext: true })).toBe(
+      "LLM error server_error: Something exploded",
+    );
+  });
+
   it("returns a friendly message for rate limit errors in Error: prefixed payloads", () => {
     expect(sanitizeUserFacingText("Error: 429 Rate limit exceeded", { errorContext: true })).toBe(
       "⚠️ API rate limit reached. Please try again later.",

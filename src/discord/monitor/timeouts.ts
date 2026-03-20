@@ -3,6 +3,12 @@ const MAX_DISCORD_TIMEOUT_MS = 2_147_483_647;
 export const DISCORD_DEFAULT_LISTENER_TIMEOUT_MS = 120_000;
 export const DISCORD_DEFAULT_INBOUND_WORKER_TIMEOUT_MS = 30 * 60_000;
 
+export type DiscordInboundAbortReason = {
+  scope: "discord-inbound-worker";
+  kind: "timeout";
+  timeoutMs: number;
+};
+
 function clampDiscordTimeoutMs(timeoutMs: number, minimumMs: number): number {
   return Math.max(minimumMs, Math.min(Math.floor(timeoutMs), MAX_DISCORD_TIMEOUT_MS));
 }
@@ -26,11 +32,52 @@ export function normalizeDiscordInboundWorkerTimeoutMs(
   return clampDiscordTimeoutMs(raw, 1);
 }
 
+export function createDiscordInboundWorkerTimeoutAbortReason(
+  timeoutMs: number,
+): DiscordInboundAbortReason {
+  return {
+    scope: "discord-inbound-worker",
+    kind: "timeout",
+    timeoutMs,
+  };
+}
+
+export function resolveAbortReason(signal?: AbortSignal): unknown {
+  if (!signal || !("reason" in signal)) {
+    return undefined;
+  }
+  return (signal as AbortSignal & { reason?: unknown }).reason;
+}
+
+export function isDiscordInboundWorkerTimeoutAbortReason(
+  reason: unknown,
+): reason is DiscordInboundAbortReason {
+  return (
+    typeof reason === "object" &&
+    reason !== null &&
+    "scope" in reason &&
+    "kind" in reason &&
+    "timeoutMs" in reason &&
+    String((reason as { scope?: unknown }).scope) === "discord-inbound-worker" &&
+    String((reason as { kind?: unknown }).kind) === "timeout" &&
+    typeof (reason as { timeoutMs?: unknown }).timeoutMs === "number" &&
+    Number.isFinite((reason as { timeoutMs: number }).timeoutMs)
+  );
+}
+
 export function isAbortError(error: unknown): boolean {
   if (typeof error !== "object" || error === null) {
     return false;
   }
   return "name" in error && String((error as { name?: unknown }).name) === "AbortError";
+}
+
+function abortControllerWithReason(controller: AbortController, reason: unknown): void {
+  if (reason === undefined) {
+    controller.abort();
+    return;
+  }
+  controller.abort(reason);
 }
 
 export function mergeAbortSignals(
@@ -49,12 +96,15 @@ export function mergeAbortSignals(
   const fallbackController = new AbortController();
   for (const signal of activeSignals) {
     if (signal.aborted) {
-      fallbackController.abort();
+      abortControllerWithReason(fallbackController, resolveAbortReason(signal));
       return fallbackController.signal;
     }
   }
   const abortFallback = () => {
-    fallbackController.abort();
+    abortControllerWithReason(
+      fallbackController,
+      resolveAbortReason(activeSignals.find((signal) => signal.aborted)),
+    );
     for (const signal of activeSignals) {
       signal.removeEventListener("abort", abortFallback);
     }
@@ -69,6 +119,7 @@ export async function runDiscordTaskWithTimeout(params: {
   run: (abortSignal: AbortSignal | undefined) => Promise<void>;
   timeoutMs?: number;
   abortSignals?: Array<AbortSignal | undefined>;
+  createTimeoutReason?: (timeoutMs: number) => unknown;
   onTimeout: (timeoutMs: number) => void;
   onAbortAfterTimeout?: () => void;
   onErrorAfterTimeout?: (error: unknown) => void;
@@ -107,7 +158,10 @@ export async function runDiscordTaskWithTimeout(params: {
     ]);
     if (result === "timeout") {
       timedOut = true;
-      timeoutAbortController?.abort();
+      abortControllerWithReason(
+        timeoutAbortController!,
+        params.createTimeoutReason?.(params.timeoutMs),
+      );
       params.onTimeout(params.timeoutMs);
       return true;
     }

@@ -1,0 +1,12 @@
+diff --git a/dist/session-C2Q8ktsN.js b/dist/session-C2Q8ktsN.js
+index 84e331a9ff8e82afdb60a0ef8b1a7f293a5477cc..385d6a997da93feae9bb824327456518e7748737 100644
+--- a/dist/session-C2Q8ktsN.js
++++ b/dist/session-C2Q8ktsN.js
+@@ -2995,6 +2995,7 @@ async function connectAndLoadSession(options) {
+ 		record.acpSessionId = sessionId;
+ 		reconcileAgentSessionId(record, pendingAgentSessionId);
+ 	}
++	await writeSessionRecord(record);
+ 	options.onSessionIdResolved?.(sessionId);
+ 	return {
+ 		sessionId,

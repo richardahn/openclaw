@@ -21,6 +21,11 @@ overrides:
 
 packageExtensionsChecksum: sha256-n+P/SQo4Pf+dHYpYn1Y6wL4cJEVoVzZ835N0OEp4TM8=
 
+patchedDependencies:
+  acpx@0.3.0:
+    hash: ce7675775a6210eab6b53236cbef34caca64fe067e4bfcde94e46e63fb2a74c3
+    path: patches/acpx@0.3.0.patch
+
 importers:
 
   .:
@@ -259,7 +264,7 @@ importers:
     dependencies:
       acpx:
         specifier: 0.3.0
-        version: 0.3.0(zod@4.3.6)
+        version: 0.3.0(patch_hash=ce7675775a6210eab6b53236cbef34caca64fe067e4bfcde94e46e63fb2a74c3)(zod@4.3.6)
 
   extensions/bluebubbles:
     dependencies:
@@ -11446,7 +11451,7 @@ snapshots:
 
   acorn@8.16.0: {}
 
-  acpx@0.3.0(zod@4.3.6):
+  acpx@0.3.0(patch_hash=ce7675775a6210eab6b53236cbef34caca64fe067e4bfcde94e46e63fb2a74c3)(zod@4.3.6):
     dependencies:
       '@agentclientprotocol/sdk': 0.15.0(zod@4.3.6)
       commander: 14.0.3

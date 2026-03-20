@@ -128,12 +128,27 @@ function createAcpConfigWithVisibleToolTags(): OpenClawConfig {
   });
 }
 
+function createLiveAcpTestConfig(): OpenClawConfig {
+  return createAcpTestConfig({
+    acp: {
+      enabled: true,
+      stream: {
+        deliveryMode: "live",
+        coalesceIdleMs: 0,
+        maxChunkChars: 64,
+      },
+    },
+  });
+}
+
 async function runDispatch(params: {
   bodyForAgent: string;
   cfg?: OpenClawConfig;
   dispatcher?: ReplyDispatcher;
   shouldRouteToOriginating?: boolean;
+  disableBlockStreaming?: boolean;
   onReplyStart?: () => void;
+  onPartialReply?: (payload: { text?: string }) => void | Promise<void>;
   ctxOverrides?: Record<string, unknown>;
   abortSignal?: AbortSignal;
   timeoutMs?: number;
@@ -156,9 +171,11 @@ async function runDispatch(params: {
       : {}),
     shouldSendToolSummaries: true,
     bypassForCommand: false,
+    ...(params.disableBlockStreaming === true ? { disableBlockStreaming: true } : {}),
     ...(params.abortSignal ? { abortSignal: params.abortSignal } : {}),
     ...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs } : {}),
     ...(params.onReplyStart ? { onReplyStart: params.onReplyStart } : {}),
+    ...(params.onPartialReply ? { onPartialReply: params.onPartialReply } : {}),
     recordProcessed: vi.fn(),
     markIdle: vi.fn(),
   });
@@ -262,6 +279,73 @@ describe("tryDispatchAcpReply", () => {
       }),
     );
     expect(dispatcher.sendBlockReply).not.toHaveBeenCalled();
+  });
+
+  it("keeps Discord ACP live block output in the block lane by default", async () => {
+    setReadyAcpResolution();
+    mockVisibleTextTurn("hello from ACP");
+
+    const { dispatcher } = createDispatcher();
+    const result = await runDispatch({
+      bodyForAgent: "reply",
+      dispatcher,
+    });
+
+    expect(result?.queuedFinal).toBe(false);
+    expect(dispatcher.sendBlockReply).toHaveBeenCalledWith(
+      expect.objectContaining({ text: "hello from ACP" }),
+    );
+    expect(dispatcher.sendFinalReply).not.toHaveBeenCalled();
+  });
+
+  it("synthesizes one normal final when ACP block streaming is disabled", async () => {
+    setReadyAcpResolution();
+    mockVisibleTextTurn("hello from ACP");
+
+    const { dispatcher } = createDispatcher();
+    const result = await runDispatch({
+      bodyForAgent: "reply",
+      dispatcher,
+      disableBlockStreaming: true,
+    });
+
+    expect(result?.queuedFinal).toBe(true);
+    expect(dispatcher.sendBlockReply).not.toHaveBeenCalled();
+    expect(dispatcher.sendFinalReply).toHaveBeenCalledWith(
+      expect.objectContaining({ text: "hello from ACP" }),
+    );
+  });
+
+  it("forwards cumulative ACP preview text when block replies are suppressed", async () => {
+    setReadyAcpResolution();
+    const onPartialReply = vi.fn();
+    const firstChunk = `${"A".repeat(70)}. `;
+    const secondChunk = "Tail";
+    managerMocks.runTurn.mockImplementationOnce(
+      async ({ onEvent }: { onEvent: (event: unknown) => Promise<void> }) => {
+        await onEvent({ type: "text_delta", text: firstChunk, tag: "agent_message_chunk" });
+        await onEvent({ type: "text_delta", text: secondChunk, tag: "agent_message_chunk" });
+        await onEvent({ type: "done" });
+      },
+    );
+
+    const { dispatcher } = createDispatcher();
+    const result = await runDispatch({
+      bodyForAgent: "reply",
+      cfg: createLiveAcpTestConfig(),
+      dispatcher,
+      disableBlockStreaming: true,
+      onPartialReply,
+    });
+
+    expect(result?.queuedFinal).toBe(true);
+    expect(dispatcher.sendBlockReply).not.toHaveBeenCalled();
+    expect(onPartialReply).toHaveBeenCalledTimes(2);
+    expect(onPartialReply).toHaveBeenNthCalledWith(1, { text: firstChunk });
+    expect(onPartialReply).toHaveBeenNthCalledWith(2, { text: `${firstChunk}${secondChunk}` });
+    expect(dispatcher.sendFinalReply).toHaveBeenCalledWith(
+      expect.objectContaining({ text: `${firstChunk}${secondChunk}` }),
+    );
   });
 
   it("edits ACP tool lifecycle updates in place when supported", async () => {

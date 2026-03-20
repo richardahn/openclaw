@@ -7,6 +7,10 @@ import {
   updateSessionStore,
 } from "../../config/sessions.js";
 import {
+  ensureSessionTranscriptHeader,
+  resolveSessionTranscriptFile,
+} from "../../config/sessions/transcript.js";
+import {
   mergeSessionEntry,
   type SessionAcpMeta,
   type SessionEntry,
@@ -125,6 +129,48 @@ export async function listAcpSessionEntries(params: {
   return entries;
 }
 
+function resolveAcpTranscriptCwd(entry: SessionEntry | undefined): string | undefined {
+  const cwd = entry?.acp?.runtimeOptions?.cwd ?? entry?.acp?.cwd;
+  const trimmed = typeof cwd === "string" ? cwd.trim() : "";
+  return trimmed || undefined;
+}
+
+export async function ensureAcpSessionTranscript(params: {
+  sessionKey: string;
+  cfg?: OpenClawConfig;
+}): Promise<SessionEntry | null> {
+  const sessionKey = params.sessionKey.trim();
+  if (!sessionKey) {
+    return null;
+  }
+  const { storePath } = resolveSessionStorePathForAcp({
+    sessionKey,
+    cfg: params.cfg,
+  });
+  const store = loadSessionStore(storePath, { skipCache: true });
+  const storeSessionKey = resolveStoreSessionKey(store, sessionKey);
+  const entry = store[storeSessionKey];
+  const sessionId = entry?.sessionId?.trim();
+  if (!entry || !sessionId) {
+    return null;
+  }
+  const parsed = parseAgentSessionKey(sessionKey);
+  const resolved = await resolveSessionTranscriptFile({
+    sessionId,
+    sessionKey,
+    sessionEntry: entry,
+    sessionStore: store,
+    storePath,
+    agentId: parsed?.agentId ?? "main",
+  });
+  await ensureSessionTranscriptHeader({
+    sessionFile: resolved.sessionFile,
+    sessionId,
+    cwd: resolveAcpTranscriptCwd(resolved.sessionEntry ?? entry),
+  });
+  return resolved.sessionEntry ?? entry;
+}
+
 export async function upsertAcpSessionMeta(params: {
   sessionKey: string;
   cfg?: OpenClawConfig;
@@ -141,7 +187,7 @@ export async function upsertAcpSessionMeta(params: {
     sessionKey,
     cfg: params.cfg,
   });
-  return await updateSessionStore(
+  const updated = await updateSessionStore(
     storePath,
     (store) => {
       const storeSessionKey = resolveStoreSessionKey(store, sessionKey);
@@ -166,5 +212,14 @@ export async function upsertAcpSessionMeta(params: {
     {
       activeSessionKey: sessionKey.toLowerCase(),
     },
+  );
+  if (!updated?.acp) {
+    return updated;
+  }
+  return (
+    (await ensureAcpSessionTranscript({
+      sessionKey,
+      cfg: params.cfg,
+    })) ?? updated
   );
 }

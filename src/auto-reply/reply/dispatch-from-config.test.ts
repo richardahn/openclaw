@@ -797,6 +797,75 @@ describe("dispatchReplyFromConfig", () => {
     expect(dispatcher.sendFinalReply).not.toHaveBeenCalled();
   });
 
+  it("feeds live ACP preview text through onPartialReply when block replies are suppressed", async () => {
+    setNoAbort();
+    const firstChunk = `${"A".repeat(70)}. `;
+    const secondChunk = "Tail";
+    const runtime = createAcpRuntime([
+      { type: "text_delta", text: firstChunk },
+      { type: "text_delta", text: secondChunk },
+      { type: "done" },
+    ]);
+    acpMocks.readAcpSessionEntry.mockReturnValue({
+      sessionKey: "agent:codex-acp:session-1",
+      storeSessionKey: "agent:codex-acp:session-1",
+      cfg: {},
+      storePath: "/tmp/mock-sessions.json",
+      entry: {},
+      acp: {
+        backend: "acpx",
+        agent: "codex",
+        runtimeSessionName: "runtime:1",
+        mode: "persistent",
+        state: "idle",
+        lastActivityAt: Date.now(),
+      },
+    });
+    acpMocks.requireAcpRuntimeBackend.mockReturnValue({
+      id: "acpx",
+      runtime,
+    });
+
+    const cfg = {
+      acp: {
+        enabled: true,
+        dispatch: { enabled: true },
+        stream: {
+          deliveryMode: "live",
+          coalesceIdleMs: 0,
+          maxChunkChars: 64,
+        },
+      },
+    } as OpenClawConfig;
+    const dispatcher = createDispatcher();
+    const onPartialReply = vi.fn();
+    const ctx = buildTestCtx({
+      Provider: "discord",
+      Surface: "discord",
+      SessionKey: "agent:codex-acp:session-1",
+      BodyForAgent: "stream a preview",
+    });
+
+    await dispatchReplyFromConfig({
+      ctx,
+      cfg,
+      dispatcher,
+      replyOptions: {
+        disableBlockStreaming: true,
+        onPartialReply,
+      },
+      replyResolver: vi.fn(async () => ({ text: "fallback" }) as ReplyPayload),
+    });
+
+    expect(dispatcher.sendBlockReply).not.toHaveBeenCalled();
+    expect(onPartialReply).toHaveBeenCalledTimes(2);
+    expect(onPartialReply).toHaveBeenNthCalledWith(1, { text: firstChunk });
+    expect(onPartialReply).toHaveBeenNthCalledWith(2, { text: `${firstChunk}${secondChunk}` });
+    expect(dispatcher.sendFinalReply).toHaveBeenCalledWith(
+      expect.objectContaining({ text: `${firstChunk}${secondChunk}` }),
+    );
+  });
+
   it("posts a one-time resolved-session-id notice in thread after the first ACP turn", async () => {
     setNoAbort();
     const runtime = createAcpRuntime([{ type: "text_delta", text: "hello" }, { type: "done" }]);

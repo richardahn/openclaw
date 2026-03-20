@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   ACPX_BUNDLED_BIN,
   ACPX_PINNED_VERSION,
+  DEFAULT_QUEUE_OWNER_TTL_SECONDS,
   createAcpxPluginConfigSchema,
   resolveAcpxPluginConfig,
 } from "./config.js";
@@ -22,6 +23,7 @@ describe("acpx plugin config parsing", () => {
     expect(resolved.stripProviderAuthEnvVars).toBe(true);
     expect(resolved.cwd).toBe(path.resolve("/tmp/workspace"));
     expect(resolved.strictWindowsCmdWrapper).toBe(true);
+    expect(resolved.queueOwnerTtlSeconds).toBe(DEFAULT_QUEUE_OWNER_TTL_SECONDS);
   });
 
   it("accepts command override and disables plugin-local auto-install", () => {
@@ -125,6 +127,17 @@ describe("acpx plugin config parsing", () => {
     });
 
     expect(resolved.strictWindowsCmdWrapper).toBe(true);
+  });
+
+  it("accepts queueOwnerTtlSeconds override", () => {
+    const resolved = resolveAcpxPluginConfig({
+      rawConfig: {
+        queueOwnerTtlSeconds: 5,
+      },
+      workspaceDir: "/tmp/workspace",
+    });
+
+    expect(resolved.queueOwnerTtlSeconds).toBe(5);
   });
 
   it("rejects non-boolean strictWindowsCmdWrapper", () => {

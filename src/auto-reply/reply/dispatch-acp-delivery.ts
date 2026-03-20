@@ -41,7 +41,6 @@ export type AcpDispatchDeliveryCoordinator = {
   getRoutedCounts: () => Record<ReplyDispatchKind, number>;
   applyRoutedCounts: (counts: Record<ReplyDispatchKind, number>) => void;
 };
-
 export function createAcpDispatchDeliveryCoordinator(params: {
   cfg: OpenClawConfig;
   ctx: FinalizedMsgContext;
@@ -52,6 +51,7 @@ export function createAcpDispatchDeliveryCoordinator(params: {
   shouldRouteToOriginating: boolean;
   originatingChannel?: string;
   originatingTo?: string;
+  suppressVisibleBlockReplies?: boolean;
   onReplyStart?: () => Promise<void> | void;
 }): AcpDispatchDeliveryCoordinator {
   const state: AcpDispatchDeliveryState = {
@@ -129,6 +129,10 @@ export function createAcpDispatchDeliveryCoordinator(params: {
 
     if ((payload.text?.trim() ?? "").length > 0 || payload.mediaUrl || payload.mediaUrls?.length) {
       await startReplyLifecycleOnce();
+    }
+
+    if (kind === "block" && params.suppressVisibleBlockReplies === true) {
+      return false;
     }
 
     const ttsPayload = await maybeApplyTtsToPayload({

@@ -6,7 +6,11 @@ import { materializeDiscordInboundJob, type DiscordInboundJob } from "./inbound-
 import type { RuntimeEnv } from "./message-handler.preflight.types.js";
 import { processDiscordMessage } from "./message-handler.process.js";
 import type { DiscordMonitorStatusSink } from "./status.js";
-import { normalizeDiscordInboundWorkerTimeoutMs, runDiscordTaskWithTimeout } from "./timeouts.js";
+import {
+  createDiscordInboundWorkerTimeoutAbortReason,
+  normalizeDiscordInboundWorkerTimeoutMs,
+  runDiscordTaskWithTimeout,
+} from "./timeouts.js";
 
 type DiscordInboundWorkerParams = {
   runtime: RuntimeEnv;
@@ -47,6 +51,8 @@ async function processDiscordInboundJob(params: {
     },
     timeoutMs,
     abortSignals: [params.job.runtime.abortSignal, params.lifecycleSignal],
+    createTimeoutReason: (resolvedTimeoutMs) =>
+      createDiscordInboundWorkerTimeoutAbortReason(resolvedTimeoutMs),
     onTimeout: (resolvedTimeoutMs) => {
       params.runtime.error?.(
         danger(

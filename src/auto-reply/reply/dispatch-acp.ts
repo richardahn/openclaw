@@ -29,6 +29,7 @@ import {
   shouldHandleTextCommands,
 } from "../commands-registry.js";
 import type { FinalizedMsgContext } from "../templating.js";
+import type { ReplyPayload } from "../types.js";
 import { createAcpReplyProjector } from "./acp-projector.js";
 import { createAcpDispatchDeliveryCoordinator } from "./dispatch-acp-delivery.js";
 import type { ReplyDispatcher, ReplyDispatchKind } from "./reply-dispatcher.js";
@@ -197,9 +198,11 @@ export async function tryDispatchAcpReply(params: {
   originatingTo?: string;
   shouldSendToolSummaries: boolean;
   bypassForCommand: boolean;
+  disableBlockStreaming?: boolean;
   abortSignal?: AbortSignal;
   timeoutMs?: number;
   onReplyStart?: () => Promise<void> | void;
+  onPartialReply?: (payload: ReplyPayload) => Promise<void> | void;
   recordProcessed: DispatchProcessedRecorder;
   markIdle: (reason: string) => void;
 }): Promise<AcpDispatchAttemptResult | null> {
@@ -218,6 +221,7 @@ export async function tryDispatchAcpReply(params: {
   }
 
   let queuedFinal = false;
+  let projectedVisibleText = "";
   const delivery = createAcpDispatchDeliveryCoordinator({
     cfg: params.cfg,
     ctx: params.ctx,
@@ -228,6 +232,7 @@ export async function tryDispatchAcpReply(params: {
     shouldRouteToOriginating: params.shouldRouteToOriginating,
     originatingChannel: params.originatingChannel,
     originatingTo: params.originatingTo,
+    suppressVisibleBlockReplies: params.disableBlockStreaming === true,
     onReplyStart: params.onReplyStart,
   });
 
@@ -257,6 +262,12 @@ export async function tryDispatchAcpReply(params: {
     deliver: delivery.deliver,
     provider: params.ctx.Surface ?? params.ctx.Provider,
     accountId: params.ctx.AccountId,
+    onVisibleOutput: async (text) => {
+      projectedVisibleText = text;
+      if (params.disableBlockStreaming === true) {
+        await params.onPartialReply?.({ text });
+      }
+    },
   });
 
   const acpDispatchStartedAt = Date.now();
@@ -316,9 +327,19 @@ export async function tryDispatchAcpReply(params: {
     });
 
     await projector.flush(true);
-    const ttsMode = resolveTtsConfig(params.cfg).mode ?? "final";
     const accumulatedBlockText = delivery.getAccumulatedBlockText();
-    if (ttsMode === "final" && delivery.getBlockCount() > 0 && accumulatedBlockText.trim()) {
+    if (params.disableBlockStreaming === true && projectedVisibleText.trim()) {
+      const delivered = await delivery.deliver("final", { text: projectedVisibleText });
+      queuedFinal = queuedFinal || delivered;
+    }
+
+    const ttsMode = resolveTtsConfig(params.cfg).mode ?? "final";
+    if (
+      ttsMode === "final" &&
+      params.disableBlockStreaming !== true &&
+      delivery.getBlockCount() > 0 &&
+      accumulatedBlockText.trim()
+    ) {
       try {
         const ttsSyntheticReply = await maybeApplyTtsToPayload({
           payload: { text: accumulatedBlockText },

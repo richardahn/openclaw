@@ -93,7 +93,7 @@
     },
     "queueOwnerTtlSeconds": {
       "label": "Queue Owner TTL Seconds",
-      "help": "Idle queue-owner TTL for acpx prompt turns. Keep this short in OpenClaw to avoid delayed completion after each turn.",
+      "help": "Idle queue-owner TTL for acpx prompt turns. Default 180 seconds keeps persistent bindings warm between turns; lower values trade faster idle teardown for more cold starts.",
       "advanced": true
     },
     "mcpServers": {
