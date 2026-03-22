@@ -455,6 +455,7 @@ describe("AcpxRuntime", () => {
       expect.objectContaining({
         type: "error",
         code: "ACP_TOOL_OUTPUT_LIMIT",
+        retryable: true,
         message: expect.stringContaining("oversized cumulative tool output"),
       }),
     );
