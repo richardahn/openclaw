@@ -16,6 +16,7 @@ export const NOOP_LOGGER = {
 const tempDirs: string[] = [];
 let sharedMockCliScriptPath: Promise<string> | null = null;
 let logFileSequence = 0;
+const ACPX_TOOL_UPDATE_EVENT_BYTES_FOR_TEST = 70_000;
 
 const MOCK_CLI_SCRIPT = String.raw`#!/usr/bin/env node
 const fs = require("node:fs");
@@ -300,6 +301,31 @@ if (command === "prompt") {
     emitJson({ type: "done", stopReason: "end_turn" });
     emitJson({ type: "done", stopReason: "end_turn" });
     process.exit(0);
+  }
+
+  if (stdinText.includes("huge-tool-update")) {
+    emitUpdate(sessionFromOption, {
+      sessionUpdate: "tool_call",
+      toolCallId: "tool-huge",
+      title: "search-generated-artifacts",
+      status: "in_progress",
+      kind: "search",
+    });
+    emitUpdate(sessionFromOption, {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "tool-huge",
+      content: [
+        {
+          type: "content",
+          content: {
+            type: "text",
+            text: "X".repeat(${ACPX_TOOL_UPDATE_EVENT_BYTES_FOR_TEST}),
+          },
+        },
+      ],
+    });
+    setInterval(() => {}, 1_000);
+    return;
   }
 
   emitUpdate(sessionFromOption, {

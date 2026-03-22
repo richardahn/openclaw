@@ -403,6 +403,78 @@ describe("AcpxRuntime", () => {
     });
   });
 
+  it("preserves retryable acpx error metadata for manager recovery", async () => {
+    const runtime = sharedFixture?.runtime;
+    expect(runtime).toBeDefined();
+    if (!runtime) {
+      throw new Error("shared runtime fixture missing");
+    }
+    const handle = await runtime.ensureSession({
+      sessionKey: "agent:codex:acp:retryable-error",
+      agent: "codex",
+      mode: "persistent",
+    });
+
+    const events = [];
+    for await (const event of runtime.runTurn({
+      handle,
+      text: "trigger-retryable-error",
+      mode: "prompt",
+      requestId: "req-retryable-err",
+    })) {
+      events.push(event);
+    }
+
+    expect(events).toContainEqual({
+      type: "error",
+      message: "queue owner disconnected",
+      code: "QUEUE_OWNER_DISCONNECTED",
+      retryable: true,
+    });
+  });
+
+  it("cancels runaway tool output before the backend can OOM", async () => {
+    const { runtime, logPath } = await createMockRuntimeFixture();
+    const handle = await runtime.ensureSession({
+      sessionKey: "agent:codex:acp:tool-output-limit",
+      agent: "codex",
+      mode: "persistent",
+    });
+
+    const events = [];
+    for await (const event of runtime.runTurn({
+      handle,
+      text: "huge-tool-update",
+      mode: "prompt",
+      requestId: "req-tool-output-limit",
+    })) {
+      events.push(event);
+    }
+
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "error",
+        code: "ACP_TOOL_OUTPUT_LIMIT",
+        message: expect.stringContaining("oversized cumulative tool output"),
+      }),
+    );
+    const logs = await readMockRuntimeLogEntries(logPath);
+    expect(
+      logs.some(
+        (entry) =>
+          entry.kind === "cancel" &&
+          String(entry.sessionName ?? "") === "agent:codex:acp:tool-output-limit",
+      ),
+    ).toBe(true);
+    expect(
+      logs.some(
+        (entry) =>
+          entry.kind === "close" &&
+          String(entry.sessionName ?? "") === "agent:codex:acp:tool-output-limit",
+      ),
+    ).toBe(true);
+  });
+
   it("maps acpx permission-denied exits to actionable guidance", async () => {
     const runtime = sharedFixture?.runtime;
     expect(runtime).toBeDefined();

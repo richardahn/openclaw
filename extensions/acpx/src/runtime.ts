@@ -15,8 +15,10 @@ import { AcpRuntimeError } from "../runtime-api.js";
 import { toAcpMcpServers, type ResolvedAcpxPluginConfig } from "./config.js";
 import { checkAcpxVersion, type AcpxVersionCheckResult } from "./ensure.js";
 import {
+  extractCumulativePromptOutputText,
   parseJsonLines,
   parsePromptEventLine,
+  resolveFreshOutputDelta,
   toAcpxErrorEvent,
 } from "./runtime-internals/events.js";
 import {
@@ -47,6 +49,9 @@ export const ACPX_BACKEND_ID = "acpx";
 const ACPX_RUNTIME_HANDLE_PREFIX = "acpx:v1:";
 const DEFAULT_AGENT_FALLBACK = "codex";
 const ACPX_EXIT_CODE_PERMISSION_DENIED = 5;
+const ACPX_TOOL_UPDATE_MAX_EVENT_CHARS = 2_000_000;
+const ACPX_TOOL_UPDATE_MAX_TOTAL_CHARS_PER_TURN = 256_000_000;
+const ACPX_UNKNOWN_TOOL_UPDATE_ACCOUNTING_KEY = "__unknown_tool_call_update__";
 const ACPX_CAPABILITIES: AcpRuntimeCapabilities = {
   controls: ["session/set_mode", "session/set_config_option", "session/status"],
 };
@@ -92,6 +97,93 @@ function formatAcpxExitMessage(params: {
   return stderr || `acpx exited with code ${params.exitCode ?? "unknown"}`;
 }
 
+function decodeEmbeddedJsonString(value: string | undefined): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+  try {
+    return JSON.parse(`"${value}"`) as string;
+  } catch {
+    return value;
+  }
+}
+
+function extractToolUpdatePayloadMetrics(line: string): {
+  toolCallId?: string;
+  payloadChars: number;
+} | null {
+  if (
+    !line.includes('"method":"session/update"') ||
+    !line.includes('"sessionUpdate":"tool_call_update"')
+  ) {
+    return null;
+  }
+  const toolCallIdMatch = line.match(/"toolCallId":"((?:\\.|[^\"])*)"/);
+  return {
+    payloadChars: line.length,
+    ...(toolCallIdMatch?.[1] ? { toolCallId: decodeEmbeddedJsonString(toolCallIdMatch[1]) } : {}),
+  };
+}
+
+function accumulateEstimatedToolUpdatePayloadChars(params: {
+  metrics: {
+    toolCallId?: string;
+    payloadChars: number;
+  };
+  totalPayloadChars: number;
+  maxPayloadCharsByToolCallId: Map<string, number>;
+}): number {
+  const accountingKey = params.metrics.toolCallId || ACPX_UNKNOWN_TOOL_UPDATE_ACCOUNTING_KEY;
+  const previousMaxPayloadChars = params.maxPayloadCharsByToolCallId.get(accountingKey) ?? 0;
+  if (params.metrics.payloadChars <= previousMaxPayloadChars) {
+    return params.totalPayloadChars;
+  }
+  params.maxPayloadCharsByToolCallId.set(accountingKey, params.metrics.payloadChars);
+  return params.totalPayloadChars + (params.metrics.payloadChars - previousMaxPayloadChars);
+}
+
+function parseToolCallUpdateSummaryFromLine(params: {
+  line: string;
+  knownToolTitles: ReadonlyMap<string, string>;
+}): AcpRuntimeEvent | null {
+  if (
+    !params.line.includes('"method":"session/update"') ||
+    !params.line.includes('"sessionUpdate":"tool_call_update"')
+  ) {
+    return null;
+  }
+  const toolCallId = decodeEmbeddedJsonString(
+    params.line.match(/"toolCallId":"((?:\\.|[^\"])*)"/)?.[1],
+  );
+  const status = decodeEmbeddedJsonString(params.line.match(/"status":"((?:\\.|[^\"])*)"/)?.[1]);
+  const title =
+    decodeEmbeddedJsonString(params.line.match(/"title":"((?:\\.|[^\"])*)"/)?.[1]) ||
+    (toolCallId ? params.knownToolTitles.get(toolCallId) : undefined) ||
+    "tool call";
+  return {
+    type: "tool_call",
+    text: status ? `${title} (${status})` : title,
+    tag: "tool_call_update",
+    ...(toolCallId ? { toolCallId } : {}),
+    ...(status ? { status } : {}),
+    title,
+  };
+}
+
+function formatToolUpdateLimitMessage(params: {
+  toolCallId?: string;
+  payloadChars: number;
+  totalPayloadChars: number;
+}): string {
+  const toolLabel = params.toolCallId ? ` (${params.toolCallId})` : "";
+  return [
+    `ACP backend emitted oversized cumulative tool output${toolLabel}`,
+    `(${params.payloadChars} chars in one update, ${params.totalPayloadChars} estimated cumulative chars across tool updates this turn).`,
+    "Cancelled the bound session before the backend could run out of memory.",
+    "Narrow the search or exclude generated/log directories before retrying.",
+  ].join(" ");
+}
+
 function summarizeLogText(text: string, maxChars = 240): string {
   const normalized = text.trim().replace(/\s+/g, " ");
   if (!normalized) {
@@ -101,6 +193,18 @@ function summarizeLogText(text: string, maxChars = 240): string {
     return normalized;
   }
   return `${normalized.slice(0, maxChars)}...`;
+}
+
+function isPidAlive(pid: number | null | undefined): boolean {
+  if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) {
+    return false;
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function findSessionIdentifierEvent(events: AcpxJsonObject[]): AcpxJsonObject | undefined {
@@ -595,21 +699,120 @@ export class AcpxRuntime implements AcpRuntime {
     const exitPromise = waitForExit(child, { signal: input.signal });
     let sawDone = false;
     let sawError = false;
+    let emittedOutputText = "";
+    let toolUpdateEstimatedPayloadChars = 0;
+    const toolUpdateMaxPayloadCharsByToolCallId = new Map<string, number>();
+    const knownToolTitles = new Map<string, string>();
     const lines = createInterface({ input: child.stdout });
     try {
       for await (const line of lines) {
+        const toolUpdateMetrics = extractToolUpdatePayloadMetrics(line);
+        if (toolUpdateMetrics) {
+          toolUpdateEstimatedPayloadChars = accumulateEstimatedToolUpdatePayloadChars({
+            metrics: toolUpdateMetrics,
+            totalPayloadChars: toolUpdateEstimatedPayloadChars,
+            maxPayloadCharsByToolCallId: toolUpdateMaxPayloadCharsByToolCallId,
+          });
+          if (
+            toolUpdateMetrics.payloadChars >= ACPX_TOOL_UPDATE_MAX_EVENT_CHARS ||
+            toolUpdateEstimatedPayloadChars >= ACPX_TOOL_UPDATE_MAX_TOTAL_CHARS_PER_TURN
+          ) {
+            sawError = true;
+            const message = formatToolUpdateLimitMessage({
+              toolCallId: toolUpdateMetrics.toolCallId,
+              payloadChars: toolUpdateMetrics.payloadChars,
+              totalPayloadChars: toolUpdateEstimatedPayloadChars,
+            });
+            this.logger?.warn?.(
+              `acpx runtime cancelling runaway tool output for ${state.name}: ` +
+                `toolCallId=${toolUpdateMetrics.toolCallId ?? "unknown"} ` +
+                `eventChars=${toolUpdateMetrics.payloadChars} ` +
+                `estimatedTotalChars=${toolUpdateEstimatedPayloadChars}`,
+            );
+            await this.cancel({
+              handle: input.handle,
+              reason: `tool-output-limit:${toolUpdateMetrics.toolCallId ?? "unknown"}`,
+            }).catch((err) => {
+              this.logger?.warn?.(`acpx runtime tool-output-limit cancel failed: ${String(err)}`);
+            });
+            await this.close({
+              handle: input.handle,
+              reason: `tool-output-limit:${toolUpdateMetrics.toolCallId ?? "unknown"}`,
+            }).catch((err) => {
+              this.logger?.warn?.(`acpx runtime tool-output-limit close failed: ${String(err)}`);
+            });
+            try {
+              child.kill('SIGTERM');
+            } catch {
+              // Ignore kill races when the prompt command already exited.
+            }
+            yield {
+              type: 'error',
+              code: 'ACP_TOOL_OUTPUT_LIMIT',
+              message,
+              retryable: true,
+            };
+            break;
+          }
+
+          const summarizedToolUpdate = parseToolCallUpdateSummaryFromLine({
+            line,
+            knownToolTitles,
+          });
+          if (summarizedToolUpdate) {
+            if (summarizedToolUpdate.toolCallId && summarizedToolUpdate.title) {
+              knownToolTitles.set(summarizedToolUpdate.toolCallId, summarizedToolUpdate.title);
+            }
+            yield summarizedToolUpdate;
+            continue;
+          }
+        }
+
+        const cumulativeOutputText = extractCumulativePromptOutputText(line);
+        if (cumulativeOutputText) {
+          const freshOutputDelta = resolveFreshOutputDelta({
+            cumulativeText: cumulativeOutputText,
+            emittedText: emittedOutputText,
+          });
+          if (freshOutputDelta) {
+            emittedOutputText += freshOutputDelta;
+            yield {
+              type: 'text_delta',
+              text: freshOutputDelta,
+              stream: 'output',
+              tag: 'agent_message_chunk',
+            };
+          }
+        }
+
         const parsed = parsePromptEventLine(line);
         if (!parsed) {
           continue;
         }
-        if (parsed.type === "done") {
+        if (
+          cumulativeOutputText &&
+          parsed.type === 'text_delta' &&
+          (parsed.stream === undefined || parsed.stream === 'output')
+        ) {
+          continue;
+        }
+        if (parsed.type === 'done') {
           if (sawDone) {
             continue;
           }
           sawDone = true;
         }
-        if (parsed.type === "error") {
+        if (parsed.type === 'error') {
           sawError = true;
+        }
+        if (
+          parsed.type === 'text_delta' &&
+          (parsed.stream === undefined || parsed.stream === 'output')
+        ) {
+          emittedOutputText += parsed.text;
+        }
+        if (parsed.type === 'tool_call' && parsed.toolCallId && parsed.title) {
+          knownToolTitles.set(parsed.toolCallId, parsed.title);
         }
         yield parsed;
       }
