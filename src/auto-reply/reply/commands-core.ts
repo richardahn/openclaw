@@ -12,6 +12,7 @@ import type {
   CommandHandlerResult,
   HandleCommandsParams,
 } from "./commands-types.js";
+import { clearSessionQueues } from "./queue.js";
 
 let routeReplyRuntimePromise: Promise<typeof import("./route-reply.runtime.js")> | null = null;
 let commandHandlersRuntimePromise: Promise<typeof import("./commands-handlers.runtime.js")> | null =
@@ -200,6 +201,16 @@ export async function handleCommands(params: HandleCommandsParams): Promise<Comm
           boundAcpKey === params.sessionKey
             ? params.previousSessionEntry
             : resolveSessionEntryForHookSessionKey(params.sessionStore, boundAcpKey);
+        const cleared = clearSessionQueues([
+          boundAcpKey,
+          hookSessionEntry?.sessionId,
+          hookPreviousSessionEntry?.sessionId,
+        ]);
+        if (cleared.followupCleared > 0 || cleared.laneCleared > 0) {
+          logVerbose(
+            `acp reset-in-place: cleared followups=${cleared.followupCleared} lane=${cleared.laneCleared} keys=${cleared.keys.join(",")}`,
+          );
+        }
         await emitResetCommandHooks({
           action: commandAction,
           ctx: params.ctx,

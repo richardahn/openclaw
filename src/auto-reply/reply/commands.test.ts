@@ -80,6 +80,37 @@ vi.mock("../../infra/system-events.js", () => ({
   enqueueSystemEvent: vi.fn(),
 }));
 
+const resetAcpSessionInPlaceMock = vi.hoisted(() => vi.fn());
+vi.mock("../../acp/persistent-bindings.js", async () => {
+  const actual = await vi.importActual<typeof import("../../acp/persistent-bindings.js")>(
+    "../../acp/persistent-bindings.js",
+  );
+  return {
+    ...actual,
+    resetAcpSessionInPlace: resetAcpSessionInPlaceMock,
+  };
+});
+
+const clearSessionQueuesMock = vi.hoisted(() => vi.fn());
+vi.mock("./queue.js", async () => {
+  const actual = await vi.importActual<typeof import("./queue.js")>("./queue.js");
+  return {
+    ...actual,
+    clearSessionQueues: clearSessionQueuesMock,
+  };
+});
+
+const resolveBoundAcpThreadSessionKeyMock = vi.hoisted(() => vi.fn());
+vi.mock("./commands-acp/targets.js", async () => {
+  const actual = await vi.importActual<typeof import("./commands-acp/targets.js")>(
+    "./commands-acp/targets.js",
+  );
+  return {
+    ...actual,
+    resolveBoundAcpThreadSessionKey: resolveBoundAcpThreadSessionKeyMock,
+  };
+});
+
 vi.mock("./session-updates.js", () => ({
   incrementCompactionCount: vi.fn(),
 }));
@@ -203,6 +234,12 @@ async function readJsonFile<T>(filePath: string): Promise<T> {
 function buildParams(commandBody: string, cfg: OpenClawConfig, ctxOverrides?: Partial<MsgContext>) {
   return buildCommandTestParams(commandBody, cfg, ctxOverrides, { workspaceDir: testWorkspaceDir });
 }
+
+beforeEach(() => {
+  resetAcpSessionInPlaceMock.mockResolvedValue({ ok: false, skipped: true });
+  clearSessionQueuesMock.mockReturnValue({ followupCleared: 0, laneCleared: 0, keys: [] });
+  resolveBoundAcpThreadSessionKeyMock.mockReturnValue(undefined);
+});
 
 describe("handleCommands gating", () => {
   it("blocks gated commands when disabled or not elevated-allowlisted", async () => {
@@ -1604,6 +1641,50 @@ describe("handleCommands hooks", () => {
       expect(spy, testCase.name).toHaveBeenCalledWith(testCase.expectedCall);
       spy.mockRestore();
     }
+  });
+
+  it("clears bound ACP queues when /new resets the session in place", async () => {
+    const cfg = {
+      commands: { text: true },
+      channels: { discord: { allowFrom: ["*"] } },
+    } as OpenClawConfig;
+    const params = buildParams("/new", cfg, {
+      Provider: "discord",
+      Surface: "discord",
+      SenderId: "12345",
+      From: "discord:12345",
+      To: "channel:1478836151241412759",
+      SessionKey: "agent:saphyre-dev:discord:channel:1478836151241412759",
+      CommandAuthorized: true,
+    });
+    params.sessionKey = "agent:saphyre-dev:discord:channel:1478836151241412759";
+    params.sessionEntry = {
+      sessionId: "local-session-current",
+      updatedAt: Date.now(),
+    } as SessionEntry;
+    params.previousSessionEntry = {
+      sessionId: "local-session-previous",
+      updatedAt: Date.now() - 1,
+    } as SessionEntry;
+    params.sessionStore = {
+      "agent:saphyre-dev:acp:binding:discord:default:883650f6e05ad61f": {
+        sessionId: "bound-session-current",
+        updatedAt: Date.now(),
+      } as SessionEntry,
+    };
+    resolveBoundAcpThreadSessionKeyMock.mockReturnValue(
+      "agent:saphyre-dev:acp:binding:discord:default:883650f6e05ad61f",
+    );
+    resetAcpSessionInPlaceMock.mockResolvedValue({ ok: true });
+
+    const result = await handleCommands(params);
+
+    expect(result.shouldContinue).toBe(false);
+    expect(clearSessionQueuesMock).toHaveBeenCalledWith([
+      "agent:saphyre-dev:acp:binding:discord:default:883650f6e05ad61f",
+      "bound-session-current",
+      "bound-session-current",
+    ]);
   });
 });
 
