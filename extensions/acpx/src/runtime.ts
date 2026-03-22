@@ -811,7 +811,7 @@ export class AcpxRuntime implements AcpRuntime {
         ) {
           emittedOutputText += parsed.text;
         }
-        if (parsed.type === 'tool_call' && parsed.toolCallId && parsed.title) {
+        if (parsed.type === "tool_call" && parsed.toolCallId && parsed.title) {
           knownToolTitles.set(parsed.toolCallId, parsed.title);
         }
         yield parsed;

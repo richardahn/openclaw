@@ -476,6 +476,50 @@ describe("AcpxRuntime", () => {
     ).toBe(true);
   });
 
+  it("allows large but valid tool-output updates to continue", async () => {
+    const { runtime } = await createMockRuntimeFixture();
+    const handle = await runtime.ensureSession({
+      sessionKey: "agent:codex:acp:large-tool-update-ok",
+      agent: "codex",
+      mode: "persistent",
+    });
+
+    const events = [];
+    for await (const event of runtime.runTurn({
+      handle,
+      text: "large-tool-update-ok",
+      mode: "prompt",
+      requestId: "req-large-tool-update-ok",
+    })) {
+      events.push(event);
+    }
+
+    expect(events).not.toContainEqual(
+      expect.objectContaining({
+        type: "error",
+        code: "ACP_TOOL_OUTPUT_LIMIT",
+      }),
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "tool_call",
+        toolCallId: "tool-large-ok",
+      }),
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "tool_call",
+        toolCallId: "tool-large-ok",
+        tag: "tool_call_update",
+      }),
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "done",
+      }),
+    );
+  });
+
   it("maps acpx permission-denied exits to actionable guidance", async () => {
     const runtime = sharedFixture?.runtime;
     expect(runtime).toBeDefined();

@@ -16,7 +16,8 @@ export const NOOP_LOGGER = {
 const tempDirs: string[] = [];
 let sharedMockCliScriptPath: Promise<string> | null = null;
 let logFileSequence = 0;
-const ACPX_TOOL_UPDATE_EVENT_BYTES_FOR_TEST = 70_000;
+const ACPX_TOOL_UPDATE_EVENT_BYTES_FOR_TEST = 2_100_000;
+const ACPX_TOOL_UPDATE_SAFE_EVENT_BYTES_FOR_TEST = 400_000;
 
 const MOCK_CLI_SCRIPT = String.raw`#!/usr/bin/env node
 const fs = require("node:fs");
@@ -326,6 +327,35 @@ if (command === "prompt") {
     });
     setInterval(() => {}, 1_000);
     return;
+  }
+
+  if (stdinText.includes("large-tool-update-ok")) {
+    emitUpdate(sessionFromOption, {
+      sessionUpdate: "tool_call",
+      toolCallId: "tool-large-ok",
+      title: "search-ticket-context",
+      status: "in_progress",
+      kind: "search",
+    });
+    emitUpdate(sessionFromOption, {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "tool-large-ok",
+      content: [
+        {
+          type: "content",
+          content: {
+            type: "text",
+            text: "Y".repeat(${ACPX_TOOL_UPDATE_SAFE_EVENT_BYTES_FOR_TEST}),
+          },
+        },
+      ],
+    });
+    emitUpdate(sessionFromOption, {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "large-tool-update-ok" },
+    });
+    emitJson({ type: "done", stopReason: "end_turn" });
+    process.exit(0);
   }
 
   emitUpdate(sessionFromOption, {
