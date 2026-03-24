@@ -237,6 +237,7 @@ describe("cron run log", () => {
         usage: {
           input_tokens: 10,
           output_tokens: 5,
+          prompt_tokens: 13,
           total_tokens: 15,
           cache_read_tokens: 2,
           cache_write_tokens: 1,
@@ -263,6 +264,7 @@ describe("cron run log", () => {
       expect(entries[0]?.usage).toEqual({
         input_tokens: 10,
         output_tokens: 5,
+        prompt_tokens: 13,
         total_tokens: 15,
         cache_read_tokens: 2,
         cache_write_tokens: 1,

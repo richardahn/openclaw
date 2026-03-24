@@ -1129,6 +1129,8 @@ export class AcpGatewayAgent implements Agent {
           _meta: {
             source: "gateway-session-store",
             approximate: true,
+            basis: "prompt_context_snapshot",
+            excludesOutput: true,
           },
         },
       });

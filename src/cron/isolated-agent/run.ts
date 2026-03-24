@@ -23,7 +23,11 @@ import {
   listDescendantRunsForRequester,
 } from "../../agents/subagent-registry.js";
 import { resolveAgentTimeoutMs } from "../../agents/timeout.js";
-import { deriveSessionTotalTokens, hasNonzeroUsage } from "../../agents/usage.js";
+import {
+  derivePromptTokens,
+  deriveSessionTotalTokens,
+  hasNonzeroUsage,
+} from "../../agents/usage.js";
 import { ensureAgentWorkspace } from "../../agents/workspace.js";
 import {
   normalizeThinkLevel,
@@ -640,11 +644,29 @@ export async function runCronIsolatedAgentTurn(params: {
     if (hasNonzeroUsage(usage)) {
       const input = usage.input ?? 0;
       const output = usage.output ?? 0;
-      const totalTokens = deriveSessionTotalTokens({
+      const cacheRead = usage.cacheRead ?? 0;
+      const cacheWrite = usage.cacheWrite ?? 0;
+      const contextSnapshotTokens = deriveSessionTotalTokens({
         usage,
         contextTokens,
         promptTokens,
       });
+      const resolvedPromptTokens =
+        typeof promptTokens === "number" && Number.isFinite(promptTokens) && promptTokens > 0
+          ? promptTokens
+          : derivePromptTokens({
+              input,
+              cacheRead,
+              cacheWrite,
+            });
+      const resolvedTotalTokens =
+        typeof usage.total === "number" && Number.isFinite(usage.total) && usage.total > 0
+          ? usage.total
+          : typeof resolvedPromptTokens === "number" &&
+              Number.isFinite(resolvedPromptTokens) &&
+              resolvedPromptTokens > 0
+            ? resolvedPromptTokens + output
+            : undefined;
       const runEstimatedCostUsd = resolveNonNegativeNumber(
         estimateUsageCost({
           usage,
@@ -661,16 +683,39 @@ export async function runCronIsolatedAgentTurn(params: {
         input_tokens: input,
         output_tokens: output,
       };
-      if (typeof totalTokens === "number" && Number.isFinite(totalTokens) && totalTokens > 0) {
-        cronSession.sessionEntry.totalTokens = totalTokens;
+      if (
+        typeof contextSnapshotTokens === "number" &&
+        Number.isFinite(contextSnapshotTokens) &&
+        contextSnapshotTokens > 0
+      ) {
+        cronSession.sessionEntry.totalTokens = contextSnapshotTokens;
         cronSession.sessionEntry.totalTokensFresh = true;
-        telemetryUsage.total_tokens = totalTokens;
       } else {
         cronSession.sessionEntry.totalTokens = undefined;
         cronSession.sessionEntry.totalTokensFresh = false;
       }
-      cronSession.sessionEntry.cacheRead = usage.cacheRead ?? 0;
-      cronSession.sessionEntry.cacheWrite = usage.cacheWrite ?? 0;
+      if (
+        typeof resolvedPromptTokens === "number" &&
+        Number.isFinite(resolvedPromptTokens) &&
+        resolvedPromptTokens > 0
+      ) {
+        telemetryUsage.prompt_tokens = resolvedPromptTokens;
+      }
+      if (
+        typeof resolvedTotalTokens === "number" &&
+        Number.isFinite(resolvedTotalTokens) &&
+        resolvedTotalTokens > 0
+      ) {
+        telemetryUsage.total_tokens = resolvedTotalTokens;
+      }
+      if (cacheRead > 0) {
+        telemetryUsage.cache_read_tokens = cacheRead;
+      }
+      if (cacheWrite > 0) {
+        telemetryUsage.cache_write_tokens = cacheWrite;
+      }
+      cronSession.sessionEntry.cacheRead = cacheRead;
+      cronSession.sessionEntry.cacheWrite = cacheWrite;
       if (runEstimatedCostUsd !== undefined) {
         cronSession.sessionEntry.estimatedCostUsd =
           (resolveNonNegativeNumber(cronSession.sessionEntry.estimatedCostUsd) ?? 0) +

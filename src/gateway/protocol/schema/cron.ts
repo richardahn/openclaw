@@ -362,6 +362,7 @@ export const CronRunLogEntrySchema = Type.Object(
         {
           input_tokens: Type.Optional(Type.Number()),
           output_tokens: Type.Optional(Type.Number()),
+          prompt_tokens: Type.Optional(Type.Number()),
           total_tokens: Type.Optional(Type.Number()),
           cache_read_tokens: Type.Optional(Type.Number()),
           cache_write_tokens: Type.Optional(Type.Number()),

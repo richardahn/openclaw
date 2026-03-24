@@ -289,6 +289,8 @@ function parseAllRunLogEntries(raw: string, opts?: { jobId?: string }): CronRunL
               input_tokens: typeof usage.input_tokens === "number" ? usage.input_tokens : undefined,
               output_tokens:
                 typeof usage.output_tokens === "number" ? usage.output_tokens : undefined,
+              prompt_tokens:
+                typeof usage.prompt_tokens === "number" ? usage.prompt_tokens : undefined,
               total_tokens: typeof usage.total_tokens === "number" ? usage.total_tokens : undefined,
               cache_read_tokens:
                 typeof usage.cache_read_tokens === "number" ? usage.cache_read_tokens : undefined,

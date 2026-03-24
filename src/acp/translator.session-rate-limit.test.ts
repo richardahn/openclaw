@@ -375,6 +375,8 @@ describe("acp session UX bridge behavior", () => {
         _meta: {
           source: "gateway-session-store",
           approximate: true,
+          basis: "prompt_context_snapshot",
+          excludesOutput: true,
         },
       },
     });
@@ -958,6 +960,8 @@ describe("acp session metadata and usage updates", () => {
         _meta: {
           source: "gateway-session-store",
           approximate: true,
+          basis: "prompt_context_snapshot",
+          excludesOutput: true,
         },
       },
     });
