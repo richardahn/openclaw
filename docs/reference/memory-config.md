@@ -27,7 +27,10 @@ automatic flush), see [Memory](/concepts/memory).
   4. `voyage` if a Voyage key can be resolved.
   5. `mistral` if a Mistral key can be resolved.
   6. Otherwise memory search stays disabled until configured.
-- Local mode uses node-llama-cpp and may require `pnpm approve-builds`.
+- Local mode uses `node-llama-cpp`. On npm installs of OpenClaw 2026.3.12+
+  it is an optional peer, so if you want local embeddings you must
+  install or satisfy it in the same install prefix after installing or updating
+  OpenClaw. If you use pnpm, you may also need `pnpm approve-builds`.
 - Uses sqlite-vec (when available) to accelerate vector search inside SQLite.
 - `memorySearch.provider = "ollama"` is also supported for local/self-hosted
   Ollama embeddings (`/api/embeddings`), but it is not auto-selected.
@@ -681,7 +684,8 @@ Notes:
 
 - Default local embedding model: `hf:ggml-org/embeddinggemma-300m-qat-q8_0-GGUF/embeddinggemma-300m-qat-Q8_0.gguf` (~0.6 GB).
 - When `memorySearch.provider = "local"`, `node-llama-cpp` resolves `modelPath`; if the GGUF is missing it **auto-downloads** to the cache (or `local.modelCacheDir` if set), then loads it. Downloads resume on retry.
-- Native build requirement: run `pnpm approve-builds`, pick `node-llama-cpp`, then `pnpm rebuild node-llama-cpp`.
+- On npm installs of OpenClaw 2026.3.12+, `node-llama-cpp` is an optional peer dependency. Install or satisfy it in the same install prefix after installing or updating OpenClaw; the GGUF auto-download only starts after `node-llama-cpp` is present and loadable.
+- Native build requirement: after installing `node-llama-cpp`, run `pnpm approve-builds`, pick `node-llama-cpp`, then `pnpm rebuild node-llama-cpp`.
 - Fallback: if local setup fails and `memorySearch.fallback = "openai"`, we automatically switch to remote embeddings (`openai/text-embedding-3-small` unless overridden) and record the reason.
 
 ## Custom OpenAI-compatible endpoint example
