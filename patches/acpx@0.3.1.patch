@@ -1,0 +1,393 @@
+diff --git a/dist/queue-ipc-EQLpBMKv.js b/dist/queue-ipc-EQLpBMKv.js
+index 0c02ec6231a7d904e88dd011ea8c0a804b9da868..eb0e948cc7473319aada86a490009f75767f069d 100644
+--- a/dist/queue-ipc-EQLpBMKv.js
++++ b/dist/queue-ipc-EQLpBMKv.js
+@@ -660,7 +660,19 @@ async function tryAcquireQueueOwnerLease(sessionId, nowIsoFactory = nowIso) {
+ 		return;
+ 	}
+ }
++function queueOwnerLeaseMatchesRecord(lease, owner) {
++	return Boolean(owner) && owner.pid === process.pid && owner.sessionId === lease.sessionId && owner.socketPath === lease.socketPath && owner.ownerGeneration === lease.ownerGeneration;
++}
++function makeQueueOwnerLeaseLostError() {
++	return new QueueConnectionError("Queue owner lost its lease", {
++		detailCode: "QUEUE_OWNER_LEASE_LOST",
++		origin: "queue",
++		retryable: true
++	});
++}
+ async function refreshQueueOwnerLease(lease, options, nowIsoFactory = nowIso) {
++	const currentOwner = await readQueueOwnerRecord(lease.sessionId);
++	if (!queueOwnerLeaseMatchesRecord(lease, currentOwner)) throw makeQueueOwnerLeaseLostError();
+ 	const payload = JSON.stringify({
+ 		pid: process.pid,
+ 		sessionId: lease.sessionId,
+@@ -673,6 +685,8 @@ async function refreshQueueOwnerLease(lease, options, nowIsoFactory = nowIso) {
+ 	await fs.writeFile(lease.lockPath, `${payload}\n`, { encoding: "utf8" });
+ }
+ async function releaseQueueOwnerLease(lease) {
++	const currentOwner = await readQueueOwnerRecord(lease.sessionId);
++	if (!queueOwnerLeaseMatchesRecord(lease, currentOwner)) return;
+ 	await removeSocketFile(lease.socketPath).catch(() => {});
+ 	await fs.unlink(lease.lockPath).catch((error) => {
+ 		if (error.code !== "ENOENT") throw error;
+diff --git a/dist/session-C2Q8ktsN.js b/dist/session-C2Q8ktsN.js
+index 84e331a9ff8e82afdb60a0ef8b1a7f293a5477cc..c8d8832686774474c1fdb2c02982c648dd74409e 100644
+--- a/dist/session-C2Q8ktsN.js
++++ b/dist/session-C2Q8ktsN.js
+@@ -1663,6 +1663,13 @@ const MAX_RUNTIME_AGENT_TEXT_CHARS = 8e3;
+ const MAX_RUNTIME_THINKING_CHARS = 4e3;
+ const MAX_RUNTIME_TOOL_IO_CHARS = 4e3;
+ const MAX_RUNTIME_REQUEST_TOKEN_USAGE = 100;
++const MAX_RUNTIME_TOOL_OUTPUT_PREVIEW_CHARS = 512;
++const MAX_RUNTIME_TOOL_BLOB_PREVIEW_CHARS = 256;
++const MAX_RUNTIME_TOOL_OUTPUT_ARRAY_ITEMS = 8;
++const MAX_RUNTIME_TOOL_OUTPUT_OBJECT_KEYS = 12;
++const MAX_RUNTIME_TOOL_OUTPUT_DEPTH = 4;
++const MAX_RUNTIME_TOOL_OUTPUT_NODES = 64;
++const RUNTIME_TOOL_OUTPUT_SUMMARY_KEY = "__acpxSummary";
+ function isoNow$1() {
+ 	return (/* @__PURE__ */ new Date()).toISOString();
+ }
+@@ -1778,10 +1785,86 @@ function statusIndicatesError(status) {
+ 	const normalized = status.toLowerCase();
+ 	return normalized.includes("fail") || normalized.includes("error");
+ }
++function looksLikeToolBlobString(value) {
++	if (value.length <= MAX_RUNTIME_TOOL_OUTPUT_PREVIEW_CHARS) return false;
++	if (value.startsWith("data:")) return true;
++	const sample = value.slice(0, 128);
++	if (sample.includes(" ") || sample.includes("\n") || sample.includes("\r")) return false;
++	return /^[A-Za-z0-9+/=_-]+$/.test(sample);
++}
++function createRuntimeToolOutputSummary(type, metadata = {}) {
++	return { [RUNTIME_TOOL_OUTPUT_SUMMARY_KEY]: {
++		type,
++		truncated: true,
++		...metadata
++	} };
++}
++function summarizeRuntimeToolOutputBoundary(value, reason) {
++	if (Array.isArray(value)) return createRuntimeToolOutputSummary("array", {
++		itemCount: value.length,
++		reason
++	});
++	const record = asRecord$2(value);
++	if (record) return createRuntimeToolOutputSummary("object", {
++		keyCount: Object.keys(record).length,
++		reason
++	});
++	return createRuntimeToolOutputSummary(typeof value, { reason });
++}
++function summarizeRuntimeToolOutputValue(value, depth, state) {
++	if (typeof value === "string") {
++		const maxChars = looksLikeToolBlobString(value) ? MAX_RUNTIME_TOOL_BLOB_PREVIEW_CHARS : MAX_RUNTIME_TOOL_OUTPUT_PREVIEW_CHARS;
++		return trimRuntimeText(value, maxChars);
++	}
++	if (value == null || typeof value === "number" || typeof value === "boolean") return value;
++	if (typeof value === "bigint") return value.toString();
++	if (typeof value !== "object") return trimRuntimeText(String(value), MAX_RUNTIME_TOOL_OUTPUT_PREVIEW_CHARS);
++	if (state.seen.has(value)) return createRuntimeToolOutputSummary("circular", { reason: "circular" });
++	if (depth >= MAX_RUNTIME_TOOL_OUTPUT_DEPTH) return summarizeRuntimeToolOutputBoundary(value, "max_depth");
++	if (state.remainingNodes <= 0) return summarizeRuntimeToolOutputBoundary(value, "max_nodes");
++	state.remainingNodes -= 1;
++	state.seen.add(value);
++	try {
++		if (Array.isArray(value)) {
++			const items = value.slice(0, MAX_RUNTIME_TOOL_OUTPUT_ARRAY_ITEMS).map((entry) => summarizeRuntimeToolOutputValue(entry, depth + 1, state));
++			if (value.length <= MAX_RUNTIME_TOOL_OUTPUT_ARRAY_ITEMS) return items;
++			return {
++				items,
++				[RUNTIME_TOOL_OUTPUT_SUMMARY_KEY]: {
++					type: "array",
++					truncated: true,
++					itemCount: value.length,
++					omittedItems: Math.max(0, value.length - items.length)
++				}
++			};
++		}
++		const record = asRecord$2(value);
++		if (!record) return trimRuntimeText(String(value), MAX_RUNTIME_TOOL_OUTPUT_PREVIEW_CHARS);
++		const keys = Object.keys(record);
++		const next = {};
++		for (const key of keys.slice(0, MAX_RUNTIME_TOOL_OUTPUT_OBJECT_KEYS)) next[key] = summarizeRuntimeToolOutputValue(record[key], depth + 1, state);
++		if (keys.length > MAX_RUNTIME_TOOL_OUTPUT_OBJECT_KEYS) next[RUNTIME_TOOL_OUTPUT_SUMMARY_KEY] = {
++			type: "object",
++			truncated: true,
++			keyCount: keys.length,
++			omittedKeys: keys.length - MAX_RUNTIME_TOOL_OUTPUT_OBJECT_KEYS
++		};
++		return next;
++	} finally {
++		state.seen.delete(value);
++	}
++}
++function summarizeRuntimeToolOutput(value) {
++	return summarizeRuntimeToolOutputValue(value, 0, {
++		remainingNodes: MAX_RUNTIME_TOOL_OUTPUT_NODES,
++		seen: new WeakSet()
++	});
++}
+ function toToolResultContent(value) {
+-	if (typeof value === "string") return { Text: trimRuntimeText(value, MAX_RUNTIME_TOOL_IO_CHARS) };
+-	if (value != null) try {
+-		return { Text: trimRuntimeText(JSON.stringify(value), MAX_RUNTIME_TOOL_IO_CHARS) };
++	const summarized = summarizeRuntimeToolOutput(value);
++	if (typeof summarized === "string") return { Text: trimRuntimeText(summarized, MAX_RUNTIME_TOOL_IO_CHARS) };
++	if (summarized != null) try {
++		return { Text: trimRuntimeText(JSON.stringify(summarized), MAX_RUNTIME_TOOL_IO_CHARS) };
+ 	} catch {
+ 		return { Text: "[Unserializable value]" };
+ 	}
+@@ -1834,7 +1917,7 @@ function applyToolCallUpdate(agent, update) {
+ 	if (hasOwn$1(update, "status")) tool.is_input_complete = statusIndicatesComplete(update.status);
+ 	if (hasOwn$1(update, "rawOutput") || hasOwn$1(update, "status") || hasOwn$1(update, "title") || hasOwn$1(update, "kind")) {
+ 		const status = update.status;
+-		const output = hasOwn$1(update, "rawOutput") ? deepClone(update.rawOutput) : void 0;
++		const output = hasOwn$1(update, "rawOutput") ? summarizeRuntimeToolOutput(update.rawOutput) : void 0;
+ 		upsertToolResult(agent, update.toolCallId, {
+ 			tool_name: tool.name,
+ 			is_error: statusIndicatesError(status),
+@@ -1895,13 +1978,15 @@ function createSessionConversation(timestamp = isoNow$1()) {
+ }
+ function cloneSessionConversation(conversation) {
+ 	if (!conversation) return createSessionConversation();
+-	return {
++	const cloned = {
+ 		title: conversation.title,
+ 		messages: deepClone(conversation.messages ?? []),
+ 		updated_at: conversation.updated_at,
+ 		cumulative_token_usage: deepClone(conversation.cumulative_token_usage ?? {}),
+ 		request_token_usage: deepClone(conversation.request_token_usage ?? {})
+ 	};
++	trimConversationForRuntime(cloned);
++	return cloned;
+ }
+ function cloneSessionAcpxState(state) {
+ 	if (!state) return;
+@@ -1998,10 +2083,10 @@ function trimConversationForRuntime(conversation) {
+ 		for (const content of message.Agent.content) if ("Text" in content) content.Text = trimRuntimeText(content.Text, MAX_RUNTIME_AGENT_TEXT_CHARS);
+ 		else if ("Thinking" in content) content.Thinking.text = trimRuntimeText(content.Thinking.text, MAX_RUNTIME_THINKING_CHARS);
+ 		else if ("ToolUse" in content) content.ToolUse.raw_input = trimRuntimeText(content.ToolUse.raw_input, MAX_RUNTIME_TOOL_IO_CHARS);
+-		for (const result of Object.values(message.Agent.tool_results)) {
+-			if ("Text" in result.content) result.content.Text = trimRuntimeText(result.content.Text, MAX_RUNTIME_TOOL_IO_CHARS);
+-			if (typeof result.output === "string") result.output = trimRuntimeText(result.output, MAX_RUNTIME_TOOL_IO_CHARS);
+-		}
++		for (const result of Object.values(message.Agent.tool_results)) if (result.output !== void 0) {
++			result.output = summarizeRuntimeToolOutput(result.output);
++			result.content = toToolResultContent(result.output);
++		} else if ("Text" in result.content) result.content.Text = trimRuntimeText(result.content.Text, MAX_RUNTIME_TOOL_IO_CHARS);
+ 	}
+ 	const requestUsageEntries = Object.entries(conversation.request_token_usage);
+ 	if (requestUsageEntries.length > MAX_RUNTIME_REQUEST_TOKEN_USAGE) conversation.request_token_usage = Object.fromEntries(requestUsageEntries.slice(-MAX_RUNTIME_REQUEST_TOKEN_USAGE));
+@@ -2995,6 +3080,7 @@ async function connectAndLoadSession(options) {
+ 		record.acpSessionId = sessionId;
+ 		reconcileAgentSessionId(record, pendingAgentSessionId);
+ 	}
++	await writeSessionRecord(record);
+ 	options.onSessionIdResolved?.(sessionId);
+ 	return {
+ 		sessionId,
+@@ -3315,18 +3401,37 @@ async function runSessionPrompt(options) {
+ 	const eventWriter = await measurePerf("session.events.open", async () => {
+ 		return await SessionEventWriter.open(record);
+ 	});
++	const PENDING_MESSAGE_BATCH_SIZE = 16;
++	const PENDING_MESSAGE_FLUSH_DELAY_MS = 25;
+ 	const pendingMessages = [];
+ 	const pendingConnectOutputMessages = [];
+ 	let bufferingConnectOutput = true;
+ 	let sawAcpMessage = false;
+ 	let eventWriterClosed = false;
++	let pendingFlushPromise = Promise.resolve();
++	let pendingFlushInFlight = false;
++	let pendingFlushCheckpointRequested = false;
++	let pendingFlushError = void 0;
++	let pendingFlushTimer = void 0;
+ 	const closeEventWriter = async (checkpoint) => {
+ 		if (eventWriterClosed) return;
+ 		eventWriterClosed = true;
+ 		await eventWriter.close({ checkpoint });
+ 	};
++	const clearPendingFlushTimer = () => {
++		if (pendingFlushTimer == null) return;
++		clearTimeout(pendingFlushTimer);
++		pendingFlushTimer = void 0;
++	};
+ 	const flushPendingMessages = async (checkpoint = false) => {
+-		if (pendingMessages.length === 0) return;
++		if (pendingMessages.length === 0) {
++			if (checkpoint) {
++				await measurePerf("session.events.flush_pending", async () => {
++					await eventWriter.checkpoint();
++				});
++			}
++			return;
++		}
+ 		const batch = pendingMessages.splice(0, pendingMessages.length);
+ 		await measurePerf("session.events.flush_pending", async () => {
+ 			await eventWriter.appendMessages(batch, { checkpoint });
+@@ -3344,6 +3449,47 @@ async function runSessionPrompt(options) {
+ 		suppressSdkConsoleErrors: options.suppressSdkConsoleErrors,
+ 		verbose: options.verbose
+ 	});
++	const schedulePendingMessagesFlush = (immediate = false) => {
++		if (pendingFlushError) return;
++		if (pendingMessages.length === 0 && !pendingFlushCheckpointRequested) {
++			if (immediate) clearPendingFlushTimer();
++			return;
++		}
++		if (!immediate && !pendingFlushCheckpointRequested && pendingMessages.length < PENDING_MESSAGE_BATCH_SIZE) {
++			if (pendingFlushTimer != null || pendingFlushInFlight) return;
++			pendingFlushTimer = setTimeout(() => {
++				pendingFlushTimer = void 0;
++				schedulePendingMessagesFlush(true);
++			}, PENDING_MESSAGE_FLUSH_DELAY_MS);
++			return;
++		}
++		clearPendingFlushTimer();
++		if (pendingFlushInFlight) return;
++		pendingFlushInFlight = true;
++		pendingFlushPromise = (async () => {
++			try {
++				while (pendingMessages.length > 0 || pendingFlushCheckpointRequested) {
++					const checkpoint = pendingFlushCheckpointRequested;
++					pendingFlushCheckpointRequested = false;
++					await flushPendingMessages(checkpoint);
++				}
++			} catch (error) {
++				pendingFlushError = error instanceof Error ? error : new Error(formatErrorMessage(error));
++				await client.requestCancelActivePrompt().catch(() => {});
++			} finally {
++				pendingFlushInFlight = false;
++				if (!pendingFlushError && (pendingMessages.length > 0 || pendingFlushCheckpointRequested)) {
++					schedulePendingMessagesFlush();
++				}
++			}
++		})();
++	};
++	const waitForPendingMessagesFlush = async (checkpoint = false) => {
++		pendingFlushCheckpointRequested = pendingFlushCheckpointRequested || checkpoint;
++		schedulePendingMessagesFlush(true);
++		await pendingFlushPromise;
++		if (pendingFlushError) throw pendingFlushError;
++	};
+ 	client.updateRuntimeOptions({
+ 		permissionMode: options.permissionMode,
+ 		nonInteractivePermissions: options.nonInteractivePermissions,
+@@ -3353,7 +3499,9 @@ async function runSessionPrompt(options) {
+ 	client.setEventHandlers({
+ 		onAcpMessage: (_direction, message) => {
+ 			sawAcpMessage = true;
++			if (pendingFlushError) return;
+ 			pendingMessages.push(message);
++			schedulePendingMessagesFlush(pendingMessages.length >= PENDING_MESSAGE_BATCH_SIZE);
+ 		},
+ 		onAcpOutputMessage: (_direction, message) => {
+ 			if (bufferingConnectOutput) {
+@@ -3418,7 +3566,7 @@ async function runSessionPrompt(options) {
+ 			pendingConnectOutputMessages.length = 0;
+ 			if (options.verbose) process.stderr.write(`[acpx] ${formatPerfMetric("prompt.connect_and_load", Date.now() - connectStartedAt)}\n`);
+ 			output.setContext({ sessionId: record.acpxRecordId });
+-			await flushPendingMessages(false);
++			await waitForPendingMessagesFlush(false);
+ 			let response;
+ 			try {
+ 				const promptStartedAt = Date.now();
+@@ -3437,7 +3585,7 @@ async function runSessionPrompt(options) {
+ 				applyLifecycleSnapshotToRecord(record, snapshot);
+ 				if (snapshot.lastExit?.unexpectedDuringPrompt && options.verbose) process.stderr.write("[acpx] agent disconnected during prompt (" + snapshot.lastExit.reason + ", exit=" + snapshot.lastExit.exitCode + ", signal=" + (snapshot.lastExit.signal ?? "none") + ")\n");
+ 				const normalizedError = normalizeOutputError(error, { origin: "runtime" });
+-				await flushPendingMessages(false).catch(() => {});
++				await waitForPendingMessagesFlush(false).catch(() => {});
+ 				output.flush();
+ 				record.lastUsedAt = isoNow();
+ 				applyConversation(record, conversation);
+@@ -3447,7 +3595,7 @@ async function runSessionPrompt(options) {
+ 				propagated.normalizedOutputError = normalizedError;
+ 				throw propagated;
+ 			}
+-			await flushPendingMessages(false);
++			await waitForPendingMessagesFlush(false);
+ 			output.flush();
+ 			record.lastUsedAt = isoNow();
+ 			record.closed = false;
+@@ -3470,7 +3618,7 @@ async function runSessionPrompt(options) {
+ 			record.lastUsedAt = isoNow();
+ 			applyConversation(record, conversation);
+ 			record.acpx = acpxState;
+-			await flushPendingMessages(false).catch(() => {});
++			await waitForPendingMessagesFlush(false).catch(() => {});
+ 			if (ownClient) await client.close();
+ 		});
+ 	} finally {
+@@ -3482,7 +3630,7 @@ async function runSessionPrompt(options) {
+ 		applyLifecycleSnapshotToRecord(record, client.getAgentLifecycleSnapshot());
+ 		applyConversation(record, conversation);
+ 		record.acpx = acpxState;
+-		await flushPendingMessages(false).catch(() => {});
++		await waitForPendingMessagesFlush(false).catch(() => {});
+ 		await closeEventWriter(true).catch(() => {});
+ 	}
+ }
+@@ -3709,6 +3857,23 @@ async function runSessionQueueOwner(options) {
+ 			turnController.endTurn();
+ 		}
+ 	};
++	let leaseLostError;
++	const handleLeaseRefreshError = (error) => {
++		if (!(error instanceof QueueConnectionError) || error.detailCode !== "QUEUE_OWNER_LEASE_LOST") return;
++		if (leaseLostError) return;
++		leaseLostError = error;
++		if (heartbeatTimer) {
++			clearInterval(heartbeatTimer);
++			heartbeatTimer = void 0;
++		}
++		if (options.verbose) process.stderr.write(`[acpx] queue owner lost lease for session ${options.sessionId}; shutting down stale owner\n`);
++		turnController.requestCancel().then((accepted) => {
++			if (!accepted) return;
++			return applyPendingCancel();
++		}).catch(() => {});
++		owner?.close().catch(() => {});
++	};
++	const hasLostLease = () => leaseLostError != null;
+ 	try {
+ 		owner = await SessionQueueOwner.start(lease, {
+ 			cancelPrompt: async () => {
+@@ -3726,19 +3891,25 @@ async function runSessionQueueOwner(options) {
+ 			maxQueueDepth,
+ 			onQueueDepthChanged: (queueDepth) => {
+ 				setPerfGauge("queue.owner.depth", queueDepth);
+-				refreshQueueOwnerLease(lease, { queueDepth }).catch(() => {});
++				refreshQueueOwnerLease(lease, { queueDepth }).catch(handleLeaseRefreshError);
+ 			}
+ 		});
+ 		if (options.verbose) process.stderr.write(`[acpx] queue owner ready for session ${options.sessionId} (ttlMs=${ttlMs}, maxQueueDepth=${maxQueueDepth})\n`);
+-		await refreshQueueOwnerLease(lease, { queueDepth: owner.queueDepth() }).catch(() => {});
++		await refreshQueueOwnerLease(lease, { queueDepth: owner.queueDepth() }).catch(handleLeaseRefreshError);
++		if (hasLostLease()) return;
+ 		heartbeatTimer = setInterval(() => {
+-			refreshQueueOwnerLease(lease, { queueDepth: owner?.queueDepth() ?? 0 }).catch(() => {});
++			refreshQueueOwnerLease(lease, { queueDepth: owner?.queueDepth() ?? 0 }).catch(handleLeaseRefreshError);
+ 		}, QUEUE_OWNER_HEARTBEAT_INTERVAL_MS);
+ 		let isFirstTask = true;
+ 		while (true) {
++			if (hasLostLease()) break;
+ 			const pollTimeoutMs = isFirstTask ? initialTaskPollTimeoutMs : taskPollTimeoutMs;
+ 			const task = await owner.nextTask(pollTimeoutMs);
+ 			if (!task) break;
++			if (hasLostLease()) {
++				task.close();
++				break;
++			}
+ 			isFirstTask = false;
+ 			await runPromptTurn(async () => {
+ 				try {
+@@ -3761,6 +3932,7 @@ async function runSessionQueueOwner(options) {
+ 					checkpointPerfMetricsCapture();
+ 				}
+ 			});
++			if (hasLostLease()) break;
+ 		}
+ 	} finally {
+ 		if (heartbeatTimer) clearInterval(heartbeatTimer);
