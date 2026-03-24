@@ -18,6 +18,8 @@ let sharedMockCliScriptPath: Promise<string> | null = null;
 let logFileSequence = 0;
 const ACPX_TOOL_UPDATE_EVENT_BYTES_FOR_TEST = 2_100_000;
 const ACPX_TOOL_UPDATE_SAFE_EVENT_BYTES_FOR_TEST = 400_000;
+const ACPX_TOOL_UPDATE_REPEAT_EVENT_BYTES_FOR_TEST = 1_800_000;
+const ACPX_TOOL_UPDATE_REPEAT_COUNT_FOR_TEST = 40;
 
 const MOCK_CLI_SCRIPT = String.raw`#!/usr/bin/env node
 const fs = require("node:fs");
@@ -355,6 +357,102 @@ if (command === "prompt") {
       content: { type: "text", text: "large-tool-update-ok" },
     });
     emitJson({ type: "done", stopReason: "end_turn" });
+    process.exit(0);
+  }
+
+  if (stdinText.includes("repeated-cumulative-tool-update-ok")) {
+    emitUpdate(sessionFromOption, {
+      sessionUpdate: "tool_call",
+      toolCallId: "tool-repeated-ok",
+      title: "search-ticket-context",
+      status: "in_progress",
+      kind: "search",
+    });
+    const repeatedUpdate = {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "tool-repeated-ok",
+      content: [
+        {
+          type: "content",
+          content: {
+            type: "text",
+            text: "Z".repeat(${ACPX_TOOL_UPDATE_REPEAT_EVENT_BYTES_FOR_TEST}),
+          },
+        },
+      ],
+    };
+    for (let index = 0; index < ${ACPX_TOOL_UPDATE_REPEAT_COUNT_FOR_TEST}; index += 1) {
+      emitUpdate(sessionFromOption, repeatedUpdate);
+    }
+    emitUpdate(sessionFromOption, {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "repeated-cumulative-tool-update-ok" },
+    });
+    emitJson({ type: "done", stopReason: "end_turn" });
+    process.exit(0);
+  }
+
+  if (stdinText.includes("raw-codex-events")) {
+    emitJson({
+      type: "event_msg",
+      payload: {
+        type: "agent_message",
+        message: "alpha",
+      },
+    });
+    emitJson({
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "alpha beta" }],
+      },
+    });
+    emitJson({
+      type: "event_msg",
+      payload: {
+        type: "task_complete",
+        last_agent_message: {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "alpha beta" }],
+        },
+      },
+    });
+    process.exit(0);
+  }
+
+  if (stdinText.includes("raw-codex-dedupe")) {
+    emitUpdate(sessionFromOption, {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "alpha" },
+    });
+    emitUpdate(sessionFromOption, {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: " beta" },
+    });
+    emitJson({
+      type: "event_msg",
+      payload: {
+        type: "agent_message",
+        message: "alpha beta",
+      },
+    });
+    emitJson({
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "alpha beta" }],
+      },
+    });
+    emitJson({
+      type: "event_msg",
+      payload: {
+        type: "task_complete",
+        last_agent_message: "alpha beta",
+      },
+    });
     process.exit(0);
   }
 

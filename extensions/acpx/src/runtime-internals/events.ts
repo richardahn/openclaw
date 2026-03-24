@@ -195,6 +195,174 @@ function createToolCallEvent(params: {
   };
 }
 
+function resolveRawEventMsgPayload(
+  parsed: Record<string, unknown>,
+): Record<string, unknown> | null {
+  if (asTrimmedString(parsed.type) === "event_msg" && isRecord(parsed.payload)) {
+    return parsed.payload;
+  }
+  const eventMsg = parsed.event_msg;
+  if (!isRecord(eventMsg)) {
+    return null;
+  }
+  if (isRecord(eventMsg.payload)) {
+    return eventMsg.payload;
+  }
+  return eventMsg;
+}
+
+function resolveRawResponseItemPayload(
+  parsed: Record<string, unknown>,
+): Record<string, unknown> | null {
+  if (asTrimmedString(parsed.type) === "response_item" && isRecord(parsed.payload)) {
+    return parsed.payload;
+  }
+  const responseItem = parsed.response_item;
+  if (!isRecord(responseItem)) {
+    return null;
+  }
+  if (isRecord(responseItem.payload)) {
+    return responseItem.payload;
+  }
+  return responseItem;
+}
+
+function extractContentText(value: unknown): string | null {
+  if (typeof value === "string") {
+    return value.length > 0 ? value : null;
+  }
+  if (Array.isArray(value)) {
+    let combined = "";
+    for (const item of value) {
+      const text = extractContentText(item);
+      if (text) {
+        combined += text;
+      }
+    }
+    return combined.length > 0 ? combined : null;
+  }
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const type = asTrimmedString(value.type);
+  if (type === "output_text" || type === "text") {
+    const text = asString(value.text);
+    if (text && text.length > 0) {
+      return text;
+    }
+  }
+
+  if (Array.isArray(value.content) || isRecord(value.content)) {
+    return extractContentText(value.content);
+  }
+
+  return null;
+}
+
+function extractLastAgentMessageText(value: unknown): string | null {
+  if (typeof value === "string") {
+    return value.length > 0 ? value : null;
+  }
+  if (Array.isArray(value)) {
+    return extractContentText(value);
+  }
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const directText =
+    asString(value.message) || asString(value.text) || asString(value.agent_message);
+  if (directText && directText.length > 0) {
+    return directText;
+  }
+
+  if (Array.isArray(value.content) || isRecord(value.content)) {
+    const contentText = extractContentText(value.content);
+    if (contentText) {
+      return contentText;
+    }
+  }
+
+  if (isRecord(value.last_agent_message) || Array.isArray(value.last_agent_message)) {
+    return extractLastAgentMessageText(value.last_agent_message);
+  }
+
+  return null;
+}
+
+function resolveRawAgentMessageText(parsed: Record<string, unknown>): string | null {
+  const payload = resolveRawEventMsgPayload(parsed);
+  if (!payload) {
+    return null;
+  }
+  if (asTrimmedString(payload.type) === "agent_message") {
+    return asString(payload.message) || asString(payload.text) || asString(payload.content) || null;
+  }
+  const agentMessage = asString(payload.agent_message);
+  return agentMessage && agentMessage.length > 0 ? agentMessage : null;
+}
+
+function resolveRawResponseItemText(parsed: Record<string, unknown>): string | null {
+  const payload = resolveRawResponseItemPayload(parsed);
+  if (!payload) {
+    return null;
+  }
+  const itemType = asTrimmedString(payload.type);
+  if (itemType && itemType !== "message") {
+    return null;
+  }
+  const role = asTrimmedString(payload.role);
+  if (role && role !== "assistant") {
+    return null;
+  }
+  return extractContentText(payload.content);
+}
+
+function isRawTaskCompleteEvent(parsed: Record<string, unknown>): boolean {
+  const payload = resolveRawEventMsgPayload(parsed);
+  if (!payload) {
+    return false;
+  }
+  return asTrimmedString(payload.type) === "task_complete" || isRecord(payload.task_complete);
+}
+
+function resolveRawTaskCompleteText(parsed: Record<string, unknown>): string | null {
+  const payload = resolveRawEventMsgPayload(parsed);
+  if (!payload) {
+    return null;
+  }
+  if (asTrimmedString(payload.type) === "task_complete") {
+    return extractLastAgentMessageText(payload.last_agent_message);
+  }
+  if (isRecord(payload.task_complete)) {
+    return extractLastAgentMessageText(payload.task_complete.last_agent_message);
+  }
+  return null;
+}
+
+export function extractCumulativePromptOutputText(line: string): string | null {
+  const trimmed = line.trim();
+  if (!trimmed) {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+  if (!isRecord(parsed)) {
+    return null;
+  }
+
+  return (
+    resolveRawAgentMessageText(parsed) ??
+    resolveRawResponseItemText(parsed) ??
+    resolveRawTaskCompleteText(parsed)
+  );
+}
+
 export function parsePromptEventLine(line: string): AcpRuntimeEvent | null {
   const trimmed = line.trim();
   if (!trimmed) {
@@ -318,6 +486,16 @@ export function parsePromptEventLine(line: string): AcpRuntimeEvent | null {
       };
     }
     default:
-      return null;
+      if (isRawTaskCompleteEvent(parsed)) {
+        return {
+          type: "done",
+          stopReason: "task_complete",
+        };
+      }
+      return createTextDeltaEvent({
+        content: resolveRawAgentMessageText(parsed) ?? resolveRawResponseItemText(parsed),
+        stream: "output",
+        tag: "agent_message_chunk",
+      });
   }
 }

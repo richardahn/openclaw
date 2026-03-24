@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parsePromptEventLine } from "./events.js";
+import { extractCumulativePromptOutputText, parsePromptEventLine } from "./events.js";
 
 describe("parsePromptEventLine", () => {
   it("parses raw ACP session/update agent_message_chunk lines", () => {
@@ -19,6 +19,64 @@ describe("parsePromptEventLine", () => {
       text: "hello",
       stream: "output",
       tag: "agent_message_chunk",
+    });
+  });
+
+  it("parses raw codex event_msg agent_message lines", () => {
+    const line = JSON.stringify({
+      event_msg: {
+        agent_message: "Hello from Codex",
+      },
+    });
+
+    expect(extractCumulativePromptOutputText(line)).toBe("Hello from Codex");
+    expect(parsePromptEventLine(line)).toEqual({
+      type: "text_delta",
+      text: "Hello from Codex",
+      stream: "output",
+      tag: "agent_message_chunk",
+    });
+  });
+
+  it("parses raw codex response_item assistant output_text content", () => {
+    const line = JSON.stringify({
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "assistant",
+        content: [
+          { type: "output_text", text: "Hello" },
+          { type: "output_text", text: " there" },
+        ],
+      },
+    });
+
+    expect(extractCumulativePromptOutputText(line)).toBe("Hello there");
+    expect(parsePromptEventLine(line)).toEqual({
+      type: "text_delta",
+      text: "Hello there",
+      stream: "output",
+      tag: "agent_message_chunk",
+    });
+  });
+
+  it("treats raw codex task_complete as done while exposing last_agent_message text", () => {
+    const line = JSON.stringify({
+      type: "event_msg",
+      payload: {
+        type: "task_complete",
+        last_agent_message: {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "All done" }],
+        },
+      },
+    });
+
+    expect(extractCumulativePromptOutputText(line)).toBe("All done");
+    expect(parsePromptEventLine(line)).toEqual({
+      type: "done",
+      stopReason: "task_complete",
     });
   });
 

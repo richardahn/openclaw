@@ -4,6 +4,17 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { runAcpRuntimeAdapterContract } from "../../../src/acp/runtime/adapter-contract.testkit.js";
 import { AcpxRuntime, decodeAcpxRuntimeHandleState } from "./runtime.js";
 import {
+  createLoadableAcpAgentCommand,
+  DISCARD_ACPX_OUTPUT_FORMATTER,
+  isPidAlive,
+  loadAcpxQueueIpcExports,
+  loadAcpxSessionExports,
+  readAcpxSessionRecord,
+  submitToQueueOwnerWithRetry,
+  waitForCondition,
+  waitForJsonFile,
+} from "./test-utils/acpx-reconnect-fixture.js";
+import {
   cleanupMockRuntimeFixtures,
   createMockRuntimeFixture,
   NOOP_LOGGER,
@@ -271,6 +282,372 @@ describe("AcpxRuntime", () => {
     ]);
   });
 
+  it("uses temp prompt files instead of stdin EOF transport", async () => {
+    process.env.MOCK_ACPX_STDIN_HANG_ON_DASH = "1";
+    try {
+      const { runtime, logPath } = await createMockRuntimeFixture();
+      const handle = await runtime.ensureSession({
+        sessionKey: "agent:codex:acp:temp-file-transport",
+        agent: "codex",
+        mode: "persistent",
+      });
+
+      const events = [];
+      for await (const event of runtime.runTurn({
+        handle,
+        text: "transport-check",
+        mode: "prompt",
+        requestId: "req-transport-check",
+      })) {
+        events.push(event);
+      }
+
+      expect(events).toContainEqual({
+        type: "done",
+        stopReason: "end_turn",
+      });
+
+      const logs = await readMockRuntimeLogEntries(logPath);
+      const prompt = logs.find(
+        (entry) =>
+          entry.kind === "prompt" &&
+          String(entry.sessionName ?? "") === "agent:codex:acp:temp-file-transport",
+      );
+      expect(prompt).toBeDefined();
+      expect(prompt?.promptViaStdin).toBe(false);
+      expect(prompt?.promptFileExistsDuringRead).toBe(true);
+      expect(String(prompt?.promptFilePath ?? "")).toContain(resolvePreferredOpenClawTmpDir());
+      expect(existsSync(String(prompt?.promptFilePath ?? ""))).toBe(false);
+    } finally {
+      delete process.env.MOCK_ACPX_STDIN_HANG_ON_DASH;
+    }
+  });
+
+  it("persists refreshed acpx session metadata before a queued prompt completes", async () => {
+    const originalHome = process.env.HOME;
+    const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-acpx-reconnect-"));
+    const fakeHome = path.join(tempRoot, "home");
+    const workspaceDir = path.join(tempRoot, "workspace");
+    await fs.mkdir(fakeHome, { recursive: true });
+    await fs.mkdir(workspaceDir, { recursive: true });
+    const { agentCommand, startedPath, releasePath, completedPath } =
+      createLoadableAcpAgentCommand(tempRoot);
+
+    process.env.HOME = fakeHome;
+
+    try {
+      const { createSession, closeSession, runSessionQueueOwner } = await loadAcpxSessionExports();
+      const { probeQueueOwnerHealth, trySubmitToRunningOwner } = await loadAcpxQueueIpcExports();
+      const created = (await createSession({
+        agentCommand,
+        cwd: workspaceDir,
+        name: "reconnect-regression",
+        permissionMode: "approve-reads",
+        nonInteractivePermissions: "deny",
+        authPolicy: "skip",
+        mcpServers: [],
+      })) as {
+        acpxRecordId: string;
+        pid?: number;
+      };
+
+      const recordId = created.acpxRecordId;
+      const originalRecord = await readAcpxSessionRecord<{
+        pid?: number;
+        last_prompt_at?: string;
+      }>(fakeHome, recordId);
+      expect(originalRecord.pid).toBeTypeOf("number");
+      await waitForCondition(() => !isPidAlive(originalRecord.pid), 10_000);
+
+      const { ownerPromise, result: queuedResult } = await submitToQueueOwnerWithRetry({
+        runSessionQueueOwner,
+        trySubmitToRunningOwner,
+        ownerOptions: {
+          sessionId: recordId,
+          permissionMode: "approve-reads",
+          nonInteractivePermissions: "deny",
+          authPolicy: "skip",
+          suppressSdkConsoleErrors: true,
+          ttlMs: 1_000,
+          maxQueueDepth: 4,
+        },
+        submitOptions: {
+          sessionId: recordId,
+          message: "hold reconnect open",
+          prompt: [{ type: "text", text: "hold reconnect open" }],
+          permissionMode: "approve-reads",
+          nonInteractivePermissions: "deny",
+          outputFormatter: DISCARD_ACPX_OUTPUT_FORMATTER,
+          timeoutMs: 10_000,
+          suppressSdkConsoleErrors: true,
+          waitForCompletion: false,
+        },
+      });
+      expect(queuedResult).toMatchObject({ queued: true });
+
+      const started = await waitForJsonFile<{ pid: number; sessionId: string }>(
+        startedPath,
+        10_000,
+      );
+      expect(started.sessionId).toBe(recordId);
+
+      await waitForCondition(async () => {
+        const refreshed = await readAcpxSessionRecord<{
+          pid?: number;
+          closed?: boolean;
+          agent_started_at?: string;
+          last_prompt_at?: string;
+        }>(fakeHome, recordId);
+        return (
+          refreshed.pid === started.pid &&
+          refreshed.closed === false &&
+          typeof refreshed.agent_started_at === "string" &&
+          typeof refreshed.last_prompt_at === "string"
+        );
+      }, 10_000);
+
+      const refreshedRecord = await readAcpxSessionRecord<{
+        pid?: number;
+        closed?: boolean;
+        agent_started_at?: string;
+        last_prompt_at?: string;
+      }>(fakeHome, recordId);
+      expect(refreshedRecord.pid).toBe(started.pid);
+      expect(refreshedRecord.pid).not.toBe(originalRecord.pid);
+      expect(isPidAlive(refreshedRecord.pid)).toBe(true);
+      expect(refreshedRecord.closed).toBe(false);
+      expect(refreshedRecord.agent_started_at).toEqual(expect.any(String));
+      expect(refreshedRecord.last_prompt_at).toEqual(expect.any(String));
+
+      await fs.writeFile(releasePath, "release\n", "utf8");
+      await waitForJsonFile<{ pid: number; sessionId: string }>(completedPath, 10_000);
+      await waitForCondition(async () => !(await probeQueueOwnerHealth(recordId)).hasLease, 10_000);
+      await ownerPromise;
+      await closeSession(recordId);
+    } finally {
+      if (originalHome == null) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = originalHome;
+      }
+      await fs.rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("flushes active prompt ACP messages to the event log before the prompt finishes", async () => {
+    const originalHome = process.env.HOME;
+    const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-acpx-event-flush-"));
+    const fakeHome = path.join(tempRoot, "home");
+    const workspaceDir = path.join(tempRoot, "workspace");
+    await fs.mkdir(fakeHome, { recursive: true });
+    await fs.mkdir(workspaceDir, { recursive: true });
+    const { agentCommand, startedPath, releasePath, completedPath } =
+      createLoadableAcpAgentCommand(tempRoot);
+
+    process.env.HOME = fakeHome;
+
+    try {
+      const { createSession, closeSession, runSessionQueueOwner } = await loadAcpxSessionExports();
+      const { probeQueueOwnerHealth, trySubmitToRunningOwner } = await loadAcpxQueueIpcExports();
+      const created = (await createSession({
+        agentCommand,
+        cwd: workspaceDir,
+        name: "event-flush-regression",
+        permissionMode: "approve-reads",
+        nonInteractivePermissions: "deny",
+        authPolicy: "skip",
+        mcpServers: [],
+      })) as {
+        acpxRecordId: string;
+        pid?: number;
+      };
+
+      const recordId = created.acpxRecordId;
+      const eventLogPath = path.join(fakeHome, ".acpx", "sessions", `${recordId}.stream.ndjson`);
+      const originalRecord = await readAcpxSessionRecord<{ pid?: number }>(fakeHome, recordId);
+      await waitForCondition(() => !isPidAlive(originalRecord.pid), 10_000);
+
+      const { ownerPromise, result: queuedResult } = await submitToQueueOwnerWithRetry({
+        runSessionQueueOwner,
+        trySubmitToRunningOwner,
+        ownerOptions: {
+          sessionId: recordId,
+          permissionMode: "approve-reads",
+          nonInteractivePermissions: "deny",
+          authPolicy: "skip",
+          suppressSdkConsoleErrors: true,
+          ttlMs: 1_000,
+          maxQueueDepth: 4,
+        },
+        submitOptions: {
+          sessionId: recordId,
+          message: "stream-events-before-release",
+          prompt: [{ type: "text", text: "stream-events-before-release" }],
+          permissionMode: "approve-reads",
+          nonInteractivePermissions: "deny",
+          outputFormatter: DISCARD_ACPX_OUTPUT_FORMATTER,
+          timeoutMs: 10_000,
+          suppressSdkConsoleErrors: true,
+          waitForCompletion: false,
+        },
+      });
+      expect(queuedResult).toMatchObject({ queued: true });
+
+      await waitForJsonFile<{ pid: number; sessionId: string }>(startedPath, 10_000);
+      expect(existsSync(completedPath)).toBe(false);
+
+      await waitForCondition(async () => {
+        try {
+          const eventLog = await fs.readFile(eventLogPath, "utf8");
+          return eventLog.includes("progress-1") && eventLog.includes("progress-3");
+        } catch (error) {
+          if (
+            error &&
+            typeof error === "object" &&
+            "code" in error &&
+            (error as { code?: string }).code === "ENOENT"
+          ) {
+            return false;
+          }
+          throw error;
+        }
+      }, 10_000);
+
+      const eventLogBeforeRelease = await fs.readFile(eventLogPath, "utf8");
+      expect(eventLogBeforeRelease).toContain("progress-1");
+      expect(eventLogBeforeRelease).toContain("progress-3");
+      expect(eventLogBeforeRelease).not.toContain("prompt-complete");
+      expect(existsSync(completedPath)).toBe(false);
+
+      await fs.writeFile(releasePath, "release\n", "utf8");
+      await waitForJsonFile<{ pid: number; sessionId: string }>(completedPath, 10_000);
+
+      const eventLogAfterRelease = await fs.readFile(eventLogPath, "utf8");
+      expect(eventLogAfterRelease).toContain("prompt-complete");
+
+      await waitForCondition(async () => !(await probeQueueOwnerHealth(recordId)).hasLease, 10_000);
+      await ownerPromise;
+      await closeSession(recordId);
+    } finally {
+      if (originalHome == null) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = originalHome;
+      }
+      await fs.rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("summarizes tool raw outputs in runtime conversation state instead of retaining large blobs", async () => {
+    const originalHome = process.env.HOME;
+    const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-acpx-tool-output-"));
+    const fakeHome = path.join(tempRoot, "home");
+    const workspaceDir = path.join(tempRoot, "workspace");
+    await fs.mkdir(fakeHome, { recursive: true });
+    await fs.mkdir(workspaceDir, { recursive: true });
+    const { agentCommand, completedPath } = createLoadableAcpAgentCommand(tempRoot);
+
+    process.env.HOME = fakeHome;
+
+    try {
+      const { createSession, closeSession, runSessionQueueOwner } = await loadAcpxSessionExports();
+      const { probeQueueOwnerHealth, trySubmitToRunningOwner } = await loadAcpxQueueIpcExports();
+      const created = (await createSession({
+        agentCommand,
+        cwd: workspaceDir,
+        name: "tool-output-summary-regression",
+        permissionMode: "approve-reads",
+        nonInteractivePermissions: "deny",
+        authPolicy: "skip",
+        mcpServers: [],
+      })) as {
+        acpxRecordId: string;
+        pid?: number;
+      };
+
+      const recordId = created.acpxRecordId;
+      const eventLogPath = path.join(fakeHome, ".acpx", "sessions", `${recordId}.stream.ndjson`);
+      const originalRecord = await readAcpxSessionRecord<{ pid?: number }>(fakeHome, recordId);
+      await waitForCondition(() => !isPidAlive(originalRecord.pid), 10_000);
+
+      const { ownerPromise, result: promptResult } = await submitToQueueOwnerWithRetry({
+        runSessionQueueOwner,
+        trySubmitToRunningOwner,
+        ownerOptions: {
+          sessionId: recordId,
+          permissionMode: "approve-reads",
+          nonInteractivePermissions: "deny",
+          authPolicy: "skip",
+          suppressSdkConsoleErrors: true,
+          ttlMs: 1_000,
+          maxQueueDepth: 4,
+        },
+        submitOptions: {
+          sessionId: recordId,
+          message: "summarize-tool-output",
+          prompt: [{ type: "text", text: "summarize-tool-output" }],
+          permissionMode: "approve-reads",
+          nonInteractivePermissions: "deny",
+          outputFormatter: DISCARD_ACPX_OUTPUT_FORMATTER,
+          timeoutMs: 10_000,
+          suppressSdkConsoleErrors: true,
+          waitForCompletion: true,
+        },
+      });
+      expect(promptResult).toBeDefined();
+      await waitForJsonFile<{ pid: number; sessionId: string }>(completedPath, 10_000);
+
+      const record = await readAcpxSessionRecord<{
+        messages?: Array<{
+          Agent?: {
+            tool_results?: Record<
+              string,
+              {
+                content?: { Text?: string };
+                output?: unknown;
+              }
+            >;
+          };
+        }>;
+      }>(fakeHome, recordId);
+      const agentMessage = record.messages?.find(
+        (message) => Object.keys(message.Agent?.tool_results ?? {}).length > 0,
+      )?.Agent;
+      expect(agentMessage).toBeDefined();
+
+      const stringResult = agentMessage?.tool_results?.["tool-string-output"];
+      const imageResult = agentMessage?.tool_results?.["tool-image-output"];
+      expect(typeof stringResult?.output).toBe("string");
+      expect(String(stringResult?.output ?? "")).toContain("STRING_HEAD:");
+      expect(String(stringResult?.output ?? "")).not.toContain("STRING_TAIL_MARKER");
+      expect(String(stringResult?.content?.Text ?? "")).toContain("STRING_HEAD:");
+      expect(String(stringResult?.content?.Text ?? "").length).toBeLessThanOrEqual(4_000);
+
+      const imageOutputJson = JSON.stringify(imageResult?.output ?? null);
+      expect(imageOutputJson).toContain("__acpxSummary");
+      expect(imageOutputJson).not.toContain("IMAGE_TAIL_MARKER");
+      expect(imageOutputJson).not.toContain("HTML_TAIL_MARKER");
+      expect(imageOutputJson.length).toBeLessThan(5_000);
+      expect(String(imageResult?.content?.Text ?? "").length).toBeLessThanOrEqual(4_000);
+
+      const eventLog = await fs.readFile(eventLogPath, "utf8");
+      expect(eventLog).toContain("STRING_TAIL_MARKER");
+      expect(eventLog).toContain("IMAGE_TAIL_MARKER");
+      expect(eventLog).toContain("HTML_TAIL_MARKER");
+
+      await waitForCondition(async () => !(await probeQueueOwnerHealth(recordId)).hasLease, 10_000);
+      await ownerPromise;
+      await closeSession(recordId);
+    } finally {
+      if (originalHome == null) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = originalHome;
+      }
+      await fs.rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
   it("preserves provider auth env vars when runtime uses a custom acpx command", async () => {
     vi.stubEnv("OPENAI_API_KEY", "openai-secret"); // pragma: allowlist secret
     vi.stubEnv("GITHUB_TOKEN", "gh-secret"); // pragma: allowlist secret
@@ -371,6 +748,66 @@ describe("AcpxRuntime", () => {
 
     const doneCount = events.filter((event) => event.type === "done").length;
     expect(doneCount).toBe(1);
+  });
+
+  it("surfaces raw codex event_msg/response_item output before task_complete", async () => {
+    const { runtime } = await createMockRuntimeFixture();
+    const handle = await runtime.ensureSession({
+      sessionKey: "agent:codex:acp:raw-codex-events",
+      agent: "codex",
+      mode: "persistent",
+    });
+
+    const events = [];
+    for await (const event of runtime.runTurn({
+      handle,
+      text: "raw-codex-events",
+      mode: "prompt",
+      requestId: "req-raw-codex-events",
+    })) {
+      events.push(event);
+    }
+
+    const outputText = events
+      .filter(
+        (event): event is Extract<(typeof events)[number], { type: "text_delta" }> =>
+          event.type === "text_delta" && event.stream === "output",
+      )
+      .map((event) => event.text);
+    expect(outputText).toEqual(["alpha", " beta"]);
+    expect(events.filter((event) => event.type === "done")).toEqual([
+      { type: "done", stopReason: "task_complete" },
+    ]);
+  });
+
+  it("does not duplicate raw codex final output when chunks already streamed", async () => {
+    const { runtime } = await createMockRuntimeFixture();
+    const handle = await runtime.ensureSession({
+      sessionKey: "agent:codex:acp:raw-codex-dedupe",
+      agent: "codex",
+      mode: "persistent",
+    });
+
+    const events = [];
+    for await (const event of runtime.runTurn({
+      handle,
+      text: "raw-codex-dedupe",
+      mode: "prompt",
+      requestId: "req-raw-codex-dedupe",
+    })) {
+      events.push(event);
+    }
+
+    const outputText = events
+      .filter(
+        (event): event is Extract<(typeof events)[number], { type: "text_delta" }> =>
+          event.type === "text_delta" && event.stream === "output",
+      )
+      .map((event) => event.text);
+    expect(outputText).toEqual(["alpha", " beta"]);
+    expect(events.filter((event) => event.type === "done")).toEqual([
+      { type: "done", stopReason: "task_complete" },
+    ]);
   });
 
   it("maps acpx error events into ACP runtime error events", async () => {
@@ -510,6 +947,44 @@ describe("AcpxRuntime", () => {
       expect.objectContaining({
         type: "tool_call",
         toolCallId: "tool-large-ok",
+        tag: "tool_call_update",
+      }),
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "done",
+      }),
+    );
+  });
+
+  it("does not double-count repeated cumulative tool-output snapshots", async () => {
+    const { runtime } = await createMockRuntimeFixture();
+    const handle = await runtime.ensureSession({
+      sessionKey: "agent:codex:acp:repeated-cumulative-tool-update-ok",
+      agent: "codex",
+      mode: "persistent",
+    });
+
+    const events = [];
+    for await (const event of runtime.runTurn({
+      handle,
+      text: "repeated-cumulative-tool-update-ok",
+      mode: "prompt",
+      requestId: "req-repeated-cumulative-tool-update-ok",
+    })) {
+      events.push(event);
+    }
+
+    expect(events).not.toContainEqual(
+      expect.objectContaining({
+        type: "error",
+        code: "ACP_TOOL_OUTPUT_LIMIT",
+      }),
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "tool_call",
+        toolCallId: "tool-repeated-ok",
         tag: "tool_call_update",
       }),
     );

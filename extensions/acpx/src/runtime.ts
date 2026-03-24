@@ -18,7 +18,6 @@ import {
   extractCumulativePromptOutputText,
   parseJsonLines,
   parsePromptEventLine,
-  resolveFreshOutputDelta,
   toAcpxErrorEvent,
 } from "./runtime-internals/events.js";
 import {
@@ -133,6 +132,8 @@ function accumulateEstimatedToolUpdatePayloadChars(params: {
   totalPayloadChars: number;
   maxPayloadCharsByToolCallId: Map<string, number>;
 }): number {
+  // ACP tool_call_update payloads are cumulative snapshots, so across a turn we only
+  // count the largest snapshot seen for each tool call instead of summing every repeat.
   const accountingKey = params.metrics.toolCallId || ACPX_UNKNOWN_TOOL_UPDATE_ACCOUNTING_KEY;
   const previousMaxPayloadChars = params.maxPayloadCharsByToolCallId.get(accountingKey) ?? 0;
   if (params.metrics.payloadChars <= previousMaxPayloadChars) {
@@ -193,6 +194,25 @@ function summarizeLogText(text: string, maxChars = 240): string {
     return normalized;
   }
   return `${normalized.slice(0, maxChars)}...`;
+}
+
+function resolveFreshOutputDelta(params: { cumulativeText: string; emittedText: string }): string {
+  if (!params.cumulativeText) {
+    return "";
+  }
+  if (!params.emittedText) {
+    return params.cumulativeText;
+  }
+  if (
+    params.cumulativeText === params.emittedText ||
+    params.emittedText.startsWith(params.cumulativeText)
+  ) {
+    return "";
+  }
+  if (params.cumulativeText.startsWith(params.emittedText)) {
+    return params.cumulativeText.slice(params.emittedText.length);
+  }
+  return params.cumulativeText;
 }
 
 function isPidAlive(pid: number | null | undefined): boolean {
