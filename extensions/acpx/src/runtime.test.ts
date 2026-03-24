@@ -5,6 +5,7 @@ import path from "node:path";
 import { resolvePreferredOpenClawTmpDir } from "openclaw/plugin-sdk/infra-runtime";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { runAcpRuntimeAdapterContract } from "../../../src/acp/runtime/adapter-contract.testkit.js";
+import type { AcpRuntimeEvent } from "../runtime-api.js";
 import { AcpxRuntime, decodeAcpxRuntimeHandleState } from "./runtime.js";
 import {
   createLoadableAcpAgentCommand,
@@ -88,7 +89,7 @@ describe("AcpxRuntime", () => {
     expect(decoded?.agentSessionId).toBe("inner-agent:codex:acp:123");
     expect(decoded?.backendSessionId).toBe("sid-agent:codex:acp:123");
 
-    const events = [];
+    const events: AcpRuntimeEvent[] = [];
     for await (const event of runtime.runTurn({
       handle,
       text: "hello world",
@@ -739,7 +740,7 @@ describe("AcpxRuntime", () => {
       mode: "persistent",
     });
 
-    const events = [];
+    const events: AcpRuntimeEvent[] = [];
     for await (const event of runtime.runTurn({
       handle,
       text: "double-done",
@@ -761,7 +762,7 @@ describe("AcpxRuntime", () => {
       mode: "persistent",
     });
 
-    const events = [];
+    const events: AcpRuntimeEvent[] = [];
     for await (const event of runtime.runTurn({
       handle,
       text: "raw-codex-events",
@@ -791,7 +792,7 @@ describe("AcpxRuntime", () => {
       mode: "persistent",
     });
 
-    const events = [];
+    const events: AcpRuntimeEvent[] = [];
     for await (const event of runtime.runTurn({
       handle,
       text: "raw-codex-dedupe",

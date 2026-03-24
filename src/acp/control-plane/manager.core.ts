@@ -79,57 +79,6 @@ const ACP_TURN_TIMEOUT_REASON = "turn-timeout";
 const ACP_NO_TIMEOUT_MS = 2_147_000_000;
 const MAX_RETRYABLE_TURN_RECOVERY_ATTEMPTS = 1;
 
-function isAbortLikeError(error: unknown): boolean {
-  if (error instanceof Error && error.name === "AbortError") {
-    return true;
-  }
-  if (error instanceof AcpRuntimeError) {
-    return isAbortLikeError(error.cause);
-  }
-  if (error && typeof error === "object" && "cause" in error) {
-    return isAbortLikeError((error as { cause?: unknown }).cause);
-  }
-  return false;
-}
-
-function normalizeTurnTimeoutMs(value: unknown): number | undefined {
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    return undefined;
-  }
-  const rounded = Math.floor(value);
-  if (rounded <= 0 || rounded >= ACP_NO_TIMEOUT_MS) {
-    return undefined;
-  }
-  return rounded;
-}
-
-function resolveAcpTurnTimeoutMs(params: {
-  inputTimeoutMs?: number;
-  meta: SessionAcpMeta;
-}): number | undefined {
-  const runtimeOptions = resolveRuntimeOptionsFromMeta(params.meta);
-  const candidates = [normalizeTurnTimeoutMs(params.inputTimeoutMs)];
-  if (
-    typeof runtimeOptions.timeoutSeconds === "number" &&
-    Number.isFinite(runtimeOptions.timeoutSeconds) &&
-    runtimeOptions.timeoutSeconds > 0
-  ) {
-    candidates.push(Math.max(1, Math.floor(runtimeOptions.timeoutSeconds * 1000)));
-  }
-  return candidates
-    .filter((value): value is number => typeof value === "number")
-    .toSorted((a, b) => a - b)[0];
-}
-
-function formatAcpTurnTimeoutMessage(timeoutMs: number): string {
-  const normalized = Math.max(1, Math.floor(timeoutMs));
-  const duration =
-    normalized >= 1000
-      ? `${(normalized / 1000).toFixed(normalized % 1000 === 0 ? 0 : 1)}s`
-      : `${normalized}ms`;
-  return `ACP turn timed out after ${duration}; cancel requested to unblock the session.`;
-}
-
 function isUserFacingTurnEvent(event: AcpRuntimeEvent): boolean {
   return event.type === "text_delta";
 }

@@ -1,6 +1,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createInterface, type Interface } from "node:readline";
+import { resolvePreferredOpenClawTmpDir } from "openclaw/plugin-sdk/infra-runtime";
 import type {
   AcpRuntimeCapabilities,
   AcpRuntimeDoctorReport,
@@ -14,7 +15,6 @@ import type {
   PluginLogger,
 } from "../runtime-api.js";
 import { AcpRuntimeError } from "../runtime-api.js";
-import { resolvePreferredOpenClawTmpDir } from "openclaw/plugin-sdk/infra-runtime";
 import { toAcpMcpServers, type ResolvedAcpxPluginConfig } from "./config.js";
 import { checkAcpxVersion, type AcpxVersionCheckResult } from "./ensure.js";
 import {
@@ -149,7 +149,7 @@ function accumulateEstimatedToolUpdatePayloadChars(params: {
 function parseToolCallUpdateSummaryFromLine(params: {
   line: string;
   knownToolTitles: ReadonlyMap<string, string>;
-}): AcpRuntimeEvent | null {
+}): Extract<AcpRuntimeEvent, { type: "tool_call" }> | null {
   if (
     !params.line.includes('"method":"session/update"') ||
     !params.line.includes('"sessionUpdate":"tool_call_update"')
@@ -760,13 +760,13 @@ export class AcpxRuntime implements AcpRuntime {
               this.logger?.warn?.(`acpx runtime tool-output-limit close failed: ${String(err)}`);
             });
             try {
-              child.kill('SIGTERM');
+              child.kill("SIGTERM");
             } catch {
               // Ignore kill races when the prompt command already exited.
             }
             yield {
-              type: 'error',
-              code: 'ACP_TOOL_OUTPUT_LIMIT',
+              type: "error",
+              code: "ACP_TOOL_OUTPUT_LIMIT",
               message,
               retryable: true,
             };
@@ -795,10 +795,10 @@ export class AcpxRuntime implements AcpRuntime {
           if (freshOutputDelta) {
             emittedOutputText += freshOutputDelta;
             yield {
-              type: 'text_delta',
+              type: "text_delta",
               text: freshOutputDelta,
-              stream: 'output',
-              tag: 'agent_message_chunk',
+              stream: "output",
+              tag: "agent_message_chunk",
             };
           }
         }
@@ -809,23 +809,23 @@ export class AcpxRuntime implements AcpRuntime {
         }
         if (
           cumulativeOutputText &&
-          parsed.type === 'text_delta' &&
-          (parsed.stream === undefined || parsed.stream === 'output')
+          parsed.type === "text_delta" &&
+          (parsed.stream === undefined || parsed.stream === "output")
         ) {
           continue;
         }
-        if (parsed.type === 'done') {
+        if (parsed.type === "done") {
           if (sawDone) {
             continue;
           }
           sawDone = true;
         }
-        if (parsed.type === 'error') {
+        if (parsed.type === "error") {
           sawError = true;
         }
         if (
-          parsed.type === 'text_delta' &&
-          (parsed.stream === undefined || parsed.stream === 'output')
+          parsed.type === "text_delta" &&
+          (parsed.stream === undefined || parsed.stream === "output")
         ) {
           emittedOutputText += parsed.text;
         }
