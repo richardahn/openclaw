@@ -500,8 +500,35 @@ export async function processDiscordMessage(
   const draftChunker = draftChunking ? new EmbeddedBlockChunker(draftChunking) : undefined;
   let lastPartialText = "";
   let draftText = "";
+  let partialCommittedText = "";
+  let partialCurrentText = "";
   let hasStreamedMessage = false;
   let finalizedViaPreviewMessage = false;
+
+  const appendPartialPreviewText = (base: string, next: string) => {
+    if (!base) {
+      return next;
+    }
+    if (!next) {
+      return base;
+    }
+    if (base.endsWith("\n") || /^\s/.test(next)) {
+      return `${base}${next}`;
+    }
+    return `${base}\n${next}`;
+  };
+
+  const resolvePartialDraftText = (currentSegmentText: string) =>
+    appendPartialPreviewText(partialCommittedText, currentSegmentText);
+
+  const commitPartialDraftSegment = () => {
+    if (!partialCurrentText) {
+      return;
+    }
+    partialCommittedText = resolvePartialDraftText(partialCurrentText);
+    partialCurrentText = "";
+    draftText = partialCommittedText;
+  };
 
   const resolvePreviewFinalText = (text?: string) => {
     if (typeof text !== "string") {
@@ -523,7 +550,7 @@ export async function processDiscordMessage(
     if (!trimmed) {
       return undefined;
     }
-    const currentPreviewText = discordStreamMode === "block" ? draftText : lastPartialText;
+    const currentPreviewText = draftText;
     if (
       currentPreviewText &&
       currentPreviewText.startsWith(trimmed) &&
@@ -558,7 +585,9 @@ export async function processDiscordMessage(
         return;
       }
       lastPartialText = cleaned;
-      draftStream.update(cleaned);
+      partialCurrentText = cleaned;
+      draftText = resolvePartialDraftText(partialCurrentText);
+      draftStream.update(draftText);
       return;
     }
 
@@ -606,6 +635,21 @@ export async function processDiscordMessage(
       }
     }
     await draftStream.flush();
+  };
+
+  const resetDraftStreamSegment = () => {
+    if (shouldSplitPreviewMessages && hasStreamedMessage) {
+      logVerbose("discord: calling forceNewMessage() for draft stream");
+      draftStream?.forceNewMessage();
+    }
+    if (discordStreamMode === "partial") {
+      commitPartialDraftSegment();
+      lastPartialText = "";
+      return;
+    }
+    lastPartialText = "";
+    draftText = "";
+    draftChunker?.reset();
   };
 
   // When draft streaming is active, suppress block streaming to avoid double-streaming.
@@ -775,28 +819,8 @@ export async function processDiscordMessage(
             ? !discordConfig.blockStreaming
             : undefined),
         onPartialReply: draftStream ? (payload) => updateDraftFromPartial(payload.text) : undefined,
-        onAssistantMessageStart: draftStream
-          ? () => {
-              if (shouldSplitPreviewMessages && hasStreamedMessage) {
-                logVerbose("discord: calling forceNewMessage() for draft stream");
-                draftStream.forceNewMessage();
-              }
-              lastPartialText = "";
-              draftText = "";
-              draftChunker?.reset();
-            }
-          : undefined,
-        onReasoningEnd: draftStream
-          ? () => {
-              if (shouldSplitPreviewMessages && hasStreamedMessage) {
-                logVerbose("discord: calling forceNewMessage() for draft stream");
-                draftStream.forceNewMessage();
-              }
-              lastPartialText = "";
-              draftText = "";
-              draftChunker?.reset();
-            }
-          : undefined,
+        onAssistantMessageStart: draftStream ? () => resetDraftStreamSegment() : undefined,
+        onReasoningEnd: draftStream ? () => resetDraftStreamSegment() : undefined,
         onModelSelected,
         onReasoningStream: async () => {
           await statusReactions.setThinking();

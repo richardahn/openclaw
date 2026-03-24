@@ -673,6 +673,39 @@ describe("processDiscordMessage draft streaming", () => {
     expect(draftStream.forceNewMessage).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps prior partial text visible across assistant boundaries in partial mode", async () => {
+    const draftStream = createMockDraftStreamForTest();
+
+    dispatchInboundMessage.mockImplementationOnce(async (params?: DispatchInboundParams) => {
+      await params?.replyOptions?.onPartialReply?.({ text: "Hello" });
+      await params?.replyOptions?.onAssistantMessageStart?.();
+      await params?.replyOptions?.onPartialReply?.({ text: "World" });
+      return createNoQueuedDispatchResult();
+    });
+
+    await runInPartialStreamMode();
+
+    const updates = draftStream.update.mock.calls.map((call) => call[0]);
+    expect(updates).toEqual(["Hello", "Hello\nWorld"]);
+    expect(draftStream.forceNewMessage).not.toHaveBeenCalled();
+  });
+
+  it("keeps prior partial text visible across reasoning boundaries in partial mode", async () => {
+    const draftStream = createMockDraftStreamForTest();
+
+    dispatchInboundMessage.mockImplementationOnce(async (params?: DispatchInboundParams) => {
+      await params?.replyOptions?.onPartialReply?.({ text: "Hello" });
+      await params?.replyOptions?.onReasoningEnd?.();
+      await params?.replyOptions?.onPartialReply?.({ text: "World" });
+      return createNoQueuedDispatchResult();
+    });
+
+    await runInPartialStreamMode();
+
+    const updates = draftStream.update.mock.calls.map((call) => call[0]);
+    expect(updates).toEqual(["Hello", "Hello\nWorld"]);
+  });
+
   it("strips reasoning tags from partial stream updates", async () => {
     const draftStream = createMockDraftStreamForTest();
 

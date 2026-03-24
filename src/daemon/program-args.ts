@@ -10,6 +10,13 @@ type GatewayProgramArgs = {
 type GatewayRuntimePreference = "auto" | "node" | "bun";
 
 async function resolveCliEntrypointPathForService(): Promise<string> {
+  const forcedEntrypointPath = process.env.OPENCLAW_SERVICE_ENTRYPOINT_PATH?.trim();
+  if (forcedEntrypointPath) {
+    const normalizedForcedPath = path.resolve(forcedEntrypointPath);
+    await fs.access(normalizedForcedPath);
+    return normalizedForcedPath;
+  }
+
   const argv1 = process.argv[1];
   if (!argv1) {
     throw new Error("Unable to resolve CLI entrypoint path");

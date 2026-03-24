@@ -23,9 +23,15 @@ vi.mock("node:child_process", () => ({
 import { resolveGatewayProgramArguments } from "./program-args.js";
 
 const originalArgv = [...process.argv];
+const originalServiceEntrypointPath = process.env.OPENCLAW_SERVICE_ENTRYPOINT_PATH;
 
 afterEach(() => {
   process.argv = [...originalArgv];
+  if (originalServiceEntrypointPath == null) {
+    delete process.env.OPENCLAW_SERVICE_ENTRYPOINT_PATH;
+  } else {
+    process.env.OPENCLAW_SERVICE_ENTRYPOINT_PATH = originalServiceEntrypointPath;
+  }
   vi.resetAllMocks();
 });
 
@@ -118,5 +124,27 @@ describe("resolveGatewayProgramArguments", () => {
       "18789",
     ]);
     expect(result.workingDirectory).toBe(path.resolve("/repo"));
+  });
+
+  it("prefers OPENCLAW_SERVICE_ENTRYPOINT_PATH for stable-wrapper service installs", async () => {
+    const stableWrapperPath = path.resolve("/home/test/.openclaw-installs/bin/openclaw.mjs");
+    process.env.OPENCLAW_SERVICE_ENTRYPOINT_PATH = stableWrapperPath;
+    process.argv = ["node", path.resolve("/tmp/target/openclaw.mjs")];
+    fsMocks.access.mockImplementation(async (target: string) => {
+      if (target === stableWrapperPath) {
+        return;
+      }
+      throw new Error("missing");
+    });
+
+    const result = await resolveGatewayProgramArguments({ port: 18789 });
+
+    expect(result.programArguments).toEqual([
+      process.execPath,
+      stableWrapperPath,
+      "gateway",
+      "--port",
+      "18789",
+    ]);
   });
 });
