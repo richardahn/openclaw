@@ -20,6 +20,7 @@ import {
 import type {
   AcpRuntime,
   AcpRuntimeCapabilities,
+  AcpRuntimeEvent,
   AcpRuntimeHandle,
   AcpRuntimeSessionMode,
   AcpRuntimeStatus,
@@ -788,7 +789,7 @@ export class AcpSessionManager {
                         attempt: retryableRuntimeAttempt,
                         sawDone,
                         sawUserFacingOutput,
-                        terminationReason: activeTurn?.terminationReason ?? null,
+                        terminationReason: activeTurn?.terminationReason,
                       })
                     ) {
                       logVerbose(
