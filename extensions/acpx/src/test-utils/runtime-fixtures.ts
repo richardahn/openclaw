@@ -23,6 +23,7 @@ const ACPX_TOOL_UPDATE_REPEAT_COUNT_FOR_TEST = 40;
 
 const MOCK_CLI_SCRIPT = String.raw`#!/usr/bin/env node
 const fs = require("node:fs");
+const path = require("node:path");
 
 const args = process.argv.slice(2);
 const logPath = process.env.MOCK_ACPX_LOG;
@@ -214,13 +215,32 @@ if (command === "sessions" && args[commandIndex + 1] === "close") {
 }
 
 if (command === "prompt") {
-  const stdinText = fs.readFileSync(0, "utf8");
+  const promptFileFlag = readFlag("--file");
+  if (process.env.MOCK_ACPX_STDIN_HANG_ON_DASH === "1" && promptFileFlag === "-") {
+    setInterval(() => {}, 1_000);
+    return;
+  }
+  const promptFilePath =
+    promptFileFlag && promptFileFlag !== ""
+      ? promptFileFlag === "-"
+        ? "-"
+        : path.resolve(process.cwd(), promptFileFlag)
+      : "";
+  const promptFileExistsDuringRead =
+    promptFilePath && promptFilePath !== "-" ? fs.existsSync(promptFilePath) : false;
+  const stdinText =
+    promptFilePath && promptFilePath !== "-"
+      ? fs.readFileSync(promptFilePath, "utf8")
+      : fs.readFileSync(0, "utf8");
   writeLog({
     kind: "prompt",
     agent,
     args,
     sessionName: sessionFromOption,
     stdinText,
+    promptFilePath,
+    promptFileExistsDuringRead,
+    promptViaStdin: promptFilePath === "-" || promptFilePath === "",
     openclawShell,
     openaiApiKey: process.env.OPENAI_API_KEY || "",
     githubToken: process.env.GITHUB_TOKEN || "",
@@ -271,6 +291,16 @@ if (command === "prompt") {
       type: "error",
       code: "-32000",
       message: "mock failure",
+    });
+    process.exit(1);
+  }
+
+  if (stdinText.includes("trigger-retryable-error")) {
+    emitJson({
+      type: "error",
+      code: "QUEUE_OWNER_DISCONNECTED",
+      message: "queue owner disconnected",
+      retryable: true,
     });
     process.exit(1);
   }

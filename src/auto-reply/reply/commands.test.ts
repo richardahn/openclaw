@@ -80,14 +80,14 @@ vi.mock("../../infra/system-events.js", () => ({
   enqueueSystemEvent: vi.fn(),
 }));
 
-const resetAcpSessionInPlaceMock = vi.hoisted(() => vi.fn());
-vi.mock("../../acp/persistent-bindings.js", async () => {
-  const actual = await vi.importActual<typeof import("../../acp/persistent-bindings.js")>(
-    "../../acp/persistent-bindings.js",
+const resetConfiguredBindingTargetInPlaceMock = vi.hoisted(() => vi.fn());
+vi.mock("../../channels/plugins/binding-targets.js", async () => {
+  const actual = await vi.importActual<typeof import("../../channels/plugins/binding-targets.js")>(
+    "../../channels/plugins/binding-targets.js",
   );
   return {
     ...actual,
-    resetAcpSessionInPlace: resetAcpSessionInPlaceMock,
+    resetConfiguredBindingTargetInPlace: resetConfiguredBindingTargetInPlaceMock,
   };
 });
 
@@ -236,7 +236,7 @@ function buildParams(commandBody: string, cfg: OpenClawConfig, ctxOverrides?: Pa
 }
 
 beforeEach(() => {
-  resetAcpSessionInPlaceMock.mockResolvedValue({ ok: false, skipped: true });
+  resetConfiguredBindingTargetInPlaceMock.mockResolvedValue({ ok: false, skipped: true });
   clearSessionQueuesMock.mockReturnValue({ followupCleared: 0, laneCleared: 0, keys: [] });
   resolveBoundAcpThreadSessionKeyMock.mockReturnValue(undefined);
 });
@@ -1675,7 +1675,7 @@ describe("handleCommands hooks", () => {
     resolveBoundAcpThreadSessionKeyMock.mockReturnValue(
       "agent:saphyre-dev:acp:binding:discord:default:883650f6e05ad61f",
     );
-    resetAcpSessionInPlaceMock.mockResolvedValue({ ok: true });
+    resetConfiguredBindingTargetInPlaceMock.mockResolvedValue({ ok: true });
 
     const result = await handleCommands(params);
 

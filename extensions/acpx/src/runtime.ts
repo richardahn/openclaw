@@ -1,4 +1,6 @@
-import { createInterface } from "node:readline";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import path from "node:path";
+import { createInterface, type Interface } from "node:readline";
 import type {
   AcpRuntimeCapabilities,
   AcpRuntimeDoctorReport,
@@ -12,6 +14,7 @@ import type {
   PluginLogger,
 } from "../runtime-api.js";
 import { AcpRuntimeError } from "../runtime-api.js";
+import { resolvePreferredOpenClawTmpDir } from "openclaw/plugin-sdk/infra-runtime";
 import { toAcpMcpServers, type ResolvedAcpxPluginConfig } from "./config.js";
 import { checkAcpxVersion, type AcpxVersionCheckResult } from "./ensure.js";
 import {
@@ -658,11 +661,6 @@ export class AcpxRuntime implements AcpRuntime {
 
   async *runTurn(input: AcpRuntimeTurnInput): AsyncIterable<AcpRuntimeEvent> {
     const state = this.resolveHandleState(input.handle);
-    const args = await this.buildPromptArgs({
-      agent: state.agent,
-      sessionName: state.name,
-      cwd: state.cwd,
-    });
 
     const cancelOnAbort = async () => {
       await this.cancel({
@@ -680,51 +678,51 @@ export class AcpxRuntime implements AcpRuntime {
       await cancelOnAbort();
       return;
     }
-    if (input.signal) {
-      input.signal.addEventListener("abort", onAbort, { once: true });
-    }
-    const child = spawnWithResolvedCommand(
-      {
-        command: this.config.command,
-        args,
-        cwd: state.cwd,
-        stripProviderAuthEnvVars: this.config.stripProviderAuthEnvVars,
-      },
-      this.spawnCommandOptions,
-    );
-    child.stdin.on("error", () => {
-      // Ignore EPIPE when the child exits before stdin flush completes.
+
+    const promptInvocation = await this.preparePromptInvocation({
+      input,
+      agent: state.agent,
+      sessionName: state.name,
+      cwd: state.cwd,
     });
 
-    if (input.attachments && input.attachments.length > 0) {
-      const blocks: unknown[] = [];
-      if (input.text) {
-        blocks.push({ type: "text", text: input.text });
-      }
-      for (const attachment of input.attachments) {
-        if (attachment.mediaType.startsWith("image/")) {
-          blocks.push({ type: "image", mimeType: attachment.mediaType, data: attachment.data });
-        }
-      }
-      child.stdin.end(blocks.length > 0 ? JSON.stringify(blocks) : input.text);
-    } else {
-      child.stdin.end(input.text);
-    }
-
-    let stderr = "";
-    child.stderr.on("data", (chunk) => {
-      stderr += String(chunk);
-    });
-
-    const exitPromise = waitForExit(child, { signal: input.signal });
-    let sawDone = false;
-    let sawError = false;
-    let emittedOutputText = "";
-    let toolUpdateEstimatedPayloadChars = 0;
-    const toolUpdateMaxPayloadCharsByToolCallId = new Map<string, number>();
-    const knownToolTitles = new Map<string, string>();
-    const lines = createInterface({ input: child.stdout });
+    let lines: Interface | null = null;
     try {
+      if (input.signal) {
+        input.signal.addEventListener("abort", onAbort, { once: true });
+      }
+      if (input.signal?.aborted) {
+        await cancelOnAbort();
+        return;
+      }
+
+      const child = spawnWithResolvedCommand(
+        {
+          command: this.config.command,
+          args: promptInvocation.args,
+          cwd: state.cwd,
+          stripProviderAuthEnvVars: this.config.stripProviderAuthEnvVars,
+        },
+        this.spawnCommandOptions,
+      );
+      child.stdin.on("error", () => {
+        // Ignore EPIPE when the child exits before stdin closes.
+      });
+      child.stdin.end();
+
+      let stderr = "";
+      child.stderr.on("data", (chunk) => {
+        stderr += String(chunk);
+      });
+
+      const exitPromise = waitForExit(child, { signal: input.signal });
+      let sawDone = false;
+      let sawError = false;
+      let emittedOutputText = "";
+      let toolUpdateEstimatedPayloadChars = 0;
+      const toolUpdateMaxPayloadCharsByToolCallId = new Map<string, number>();
+      const knownToolTitles = new Map<string, string>();
+      lines = createInterface({ input: child.stdout });
       for await (const line of lines) {
         const toolUpdateMetrics = extractToolUpdatePayloadMetrics(line);
         if (toolUpdateMetrics) {
@@ -873,10 +871,11 @@ export class AcpxRuntime implements AcpRuntime {
         yield { type: "done" };
       }
     } finally {
-      lines.close();
+      lines?.close();
       if (input.signal) {
         input.signal.removeEventListener("abort", onAbort);
       }
+      await this.cleanupPromptInvocation(promptInvocation.promptDir);
     }
   }
 
@@ -1097,10 +1096,80 @@ export class AcpxRuntime implements AcpRuntime {
     };
   }
 
+  private async preparePromptInvocation(params: {
+    input: AcpRuntimeTurnInput;
+    agent: string;
+    sessionName: string;
+    cwd: string;
+  }): Promise<{ args: string[]; promptDir: string }> {
+    const promptDir = await mkdtemp(
+      path.join(resolvePreferredOpenClawTmpDir(), "openclaw-acpx-prompt-"),
+    );
+    const promptFilePath = path.join(promptDir, "prompt.txt");
+    try {
+      await writeFile(promptFilePath, this.serializePromptInput(params.input), {
+        encoding: "utf8",
+      });
+      const args = await this.buildPromptArgs({
+        agent: params.agent,
+        sessionName: params.sessionName,
+        cwd: params.cwd,
+        promptFilePath,
+      });
+      return { args, promptDir };
+    } catch (error) {
+      await this.cleanupPromptInvocation(promptDir);
+      if (error instanceof AcpRuntimeError) {
+        throw error;
+      }
+      if (error instanceof Error) {
+        throw new AcpRuntimeError(
+          "ACP_TURN_FAILED",
+          `Failed to stage ACP prompt input: ${error.message}`,
+          { cause: error },
+        );
+      }
+      throw new AcpRuntimeError(
+        "ACP_TURN_FAILED",
+        `Failed to stage ACP prompt input: ${String(error)}`,
+      );
+    }
+  }
+
+  private serializePromptInput(input: AcpRuntimeTurnInput): string {
+    if (input.attachments && input.attachments.length > 0) {
+      const blocks: unknown[] = [];
+      if (input.text) {
+        blocks.push({ type: "text", text: input.text });
+      }
+      for (const attachment of input.attachments) {
+        if (attachment.mediaType.startsWith("image/")) {
+          blocks.push({ type: "image", mimeType: attachment.mediaType, data: attachment.data });
+        }
+      }
+      return blocks.length > 0 ? JSON.stringify(blocks) : (input.text ?? "");
+    }
+    return input.text ?? "";
+  }
+
+  private async cleanupPromptInvocation(promptDir: string): Promise<void> {
+    try {
+      await rm(promptDir, {
+        recursive: true,
+        force: true,
+        maxRetries: 10,
+        retryDelay: 10,
+      });
+    } catch (error) {
+      this.logger?.warn?.(`acpx runtime prompt temp cleanup failed: ${String(error)}`);
+    }
+  }
+
   private async buildPromptArgs(params: {
     agent: string;
     sessionName: string;
     cwd: string;
+    promptFilePath: string;
   }): Promise<string[]> {
     const prefix = [
       "--format",
@@ -1119,7 +1188,7 @@ export class AcpxRuntime implements AcpRuntime {
     return await this.buildVerbArgs({
       agent: params.agent,
       cwd: params.cwd,
-      command: ["prompt", "--session", params.sessionName, "--file", "-"],
+      command: ["prompt", "--session", params.sessionName, "--file", params.promptFilePath],
       prefix,
     });
   }

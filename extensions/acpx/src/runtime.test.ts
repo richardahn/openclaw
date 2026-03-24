@@ -1,5 +1,8 @@
+import { existsSync } from "node:fs";
+import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { resolvePreferredOpenClawTmpDir } from "openclaw/plugin-sdk/infra-runtime";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { runAcpRuntimeAdapterContract } from "../../../src/acp/runtime/adapter-contract.testkit.js";
 import { AcpxRuntime, decodeAcpxRuntimeHandleState } from "./runtime.js";
