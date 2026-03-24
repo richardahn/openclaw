@@ -1,10 +1,5 @@
 import crypto from "node:crypto";
 import path from "node:path";
-import {
-  buildTelegramTopicConversationId,
-  normalizeConversationText,
-  parseTelegramChatIdFromTarget,
-} from "../../acp/conversation-id.js";
 import { resolveSessionAgentId } from "../../agents/agent-scope.js";
 import { clearBootstrapSnapshotOnSessionRollover } from "../../agents/bootstrap-cache.js";
 import { normalizeChatType } from "../../channels/chat-type.js";
@@ -30,7 +25,6 @@ import {
 } from "../../config/sessions/types.js";
 import type { TtsAutoMode } from "../../config/types.tts.js";
 import { archiveSessionTranscripts } from "../../gateway/session-archive.fs.js";
-import { resolveConversationIdFromTargets } from "../../infra/outbound/conversation-id.js";
 import { deliverSessionMaintenanceWarning } from "../../infra/session-maintenance-warning.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { getGlobalHookRunner } from "../../plugins/hook-runner-global.js";
@@ -38,8 +32,6 @@ import { normalizeMainKey } from "../../routing/session-key.js";
 import { normalizeSessionDeliveryFields } from "../../utils/delivery-context.js";
 import { resolveCommandAuthorization } from "../command-auth.js";
 import type { MsgContext, TemplateContext } from "../templating.js";
-import { resolveEffectiveResetTargetSessionKey } from "./acp-reset-target.js";
-import { parseDiscordParentChannelFromSessionKey } from "./discord-parent-channel.js";
 import { normalizeInboundTextNewlines } from "./inbound-text.js";
 import { stripMentions, stripStructuralPrefixes } from "./mentions.js";
 import {
@@ -70,101 +62,6 @@ export type SessionInitResult = {
   bodyStripped?: string;
   triggerBodyNormalized: string;
 };
-
-function resolveAcpResetBindingContext(ctx: MsgContext): {
-  channel: string;
-  accountId: string;
-  conversationId: string;
-  parentConversationId?: string;
-} | null {
-  const channelRaw = normalizeConversationText(
-    ctx.OriginatingChannel ?? ctx.Surface ?? ctx.Provider ?? "",
-  ).toLowerCase();
-  if (!channelRaw) {
-    return null;
-  }
-  const accountId = normalizeConversationText(ctx.AccountId) || "default";
-  const normalizedThreadId =
-    ctx.MessageThreadId != null ? normalizeConversationText(String(ctx.MessageThreadId)) : "";
-
-  if (channelRaw === "telegram") {
-    const parentConversationId =
-      parseTelegramChatIdFromTarget(ctx.OriginatingTo) ?? parseTelegramChatIdFromTarget(ctx.To);
-    let conversationId =
-      resolveConversationIdFromTargets({
-        threadId: normalizedThreadId || undefined,
-        targets: [ctx.OriginatingTo, ctx.To],
-      }) ?? "";
-    if (normalizedThreadId && parentConversationId) {
-      conversationId =
-        buildTelegramTopicConversationId({
-          chatId: parentConversationId,
-          topicId: normalizedThreadId,
-        }) ?? conversationId;
-    }
-    if (!conversationId) {
-      return null;
-    }
-    return {
-      channel: channelRaw,
-      accountId,
-      conversationId,
-      ...(parentConversationId ? { parentConversationId } : {}),
-    };
-  }
-
-  const conversationId = resolveConversationIdFromTargets({
-    threadId: normalizedThreadId || undefined,
-    targets: [ctx.OriginatingTo, ctx.To],
-  });
-  if (!conversationId) {
-    return null;
-  }
-  let parentConversationId: string | undefined;
-  if (channelRaw === "discord" && normalizedThreadId) {
-    const fromContext = normalizeConversationText(ctx.ThreadParentId);
-    if (fromContext && fromContext !== conversationId) {
-      parentConversationId = fromContext;
-    } else {
-      const fromParentSession = parseDiscordParentChannelFromSessionKey(ctx.ParentSessionKey);
-      if (fromParentSession && fromParentSession !== conversationId) {
-        parentConversationId = fromParentSession;
-      } else {
-        const fromTargets = resolveConversationIdFromTargets({
-          targets: [ctx.OriginatingTo, ctx.To],
-        });
-        if (fromTargets && fromTargets !== conversationId) {
-          parentConversationId = fromTargets;
-        }
-      }
-    }
-  }
-  return {
-    channel: channelRaw,
-    accountId,
-    conversationId,
-    ...(parentConversationId ? { parentConversationId } : {}),
-  };
-}
-
-function resolveBoundAcpSessionForReset(params: {
-  cfg: OpenClawConfig;
-  ctx: MsgContext;
-}): string | undefined {
-  const activeSessionKey = normalizeConversationText(params.ctx.SessionKey);
-  const bindingContext = resolveAcpResetBindingContext(params.ctx);
-  return resolveEffectiveResetTargetSessionKey({
-    cfg: params.cfg,
-    channel: bindingContext?.channel,
-    accountId: bindingContext?.accountId,
-    conversationId: bindingContext?.conversationId,
-    parentConversationId: bindingContext?.parentConversationId,
-    activeSessionKey,
-    allowNonAcpBindingSessionKey: false,
-    skipConfiguredFallbackWhenActiveSessionNonAcp: true,
-    fallbackToActiveAcpWhenUnbound: false,
-  });
-}
 
 export async function initSessionState(params: {
   ctx: MsgContext;
@@ -255,16 +152,6 @@ export async function initSessionState(params: {
   const strippedForReset = isGroup
     ? stripMentions(triggerBodyNormalized, ctx, cfg, agentId)
     : triggerBodyNormalized;
-  const shouldUseAcpInPlaceReset = Boolean(
-    resolveBoundAcpSessionForReset({
-      cfg,
-      ctx: sessionCtxForState,
-    }),
-  );
-  const shouldBypassAcpResetForTrigger = (triggerLower: string): boolean =>
-    shouldUseAcpInPlaceReset &&
-    DEFAULT_RESET_TRIGGERS.some((defaultTrigger) => defaultTrigger.toLowerCase() === triggerLower);
-
   // Reset triggers are configured as lowercased commands (e.g. "/new"), but users may type
   // "/NEW" etc. Match case-insensitively while keeping the original casing for any stripped body.
   const trimmedBodyLower = trimmedBody.toLowerCase();
@@ -279,12 +166,6 @@ export async function initSessionState(params: {
     }
     const triggerLower = trigger.toLowerCase();
     if (trimmedBodyLower === triggerLower || strippedForResetLower === triggerLower) {
-      if (shouldBypassAcpResetForTrigger(triggerLower)) {
-        // ACP-bound conversations handle /new and /reset in command handling
-        // so the bound ACP runtime can be reset in place without rotating the
-        // normal OpenClaw session/transcript.
-        break;
-      }
       isNewSession = true;
       bodyStripped = "";
       resetTriggered = true;
@@ -295,9 +176,6 @@ export async function initSessionState(params: {
       trimmedBodyLower.startsWith(triggerPrefixLower) ||
       strippedForResetLower.startsWith(triggerPrefixLower)
     ) {
-      if (shouldBypassAcpResetForTrigger(triggerLower)) {
-        break;
-      }
       isNewSession = true;
       bodyStripped = strippedForReset.slice(trigger.length).trimStart();
       resetTriggered = true;
