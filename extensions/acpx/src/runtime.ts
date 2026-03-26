@@ -294,6 +294,7 @@ export class AcpxRuntime implements AcpRuntime {
   private readonly mcpProxyAgentCommandCache = new Map<string, string>();
   private readonly spawnCommandOptions: SpawnCommandOptions;
   private readonly loggedSpawnResolutions = new Set<string>();
+  private readonly ensureSessionLocks = new Map<string, Promise<AcpRuntimeHandle>>();
 
   constructor(
     private readonly config: ResolvedAcpxPluginConfig,
@@ -544,6 +545,31 @@ export class AcpxRuntime implements AcpRuntime {
     if (!sessionName) {
       throw new AcpRuntimeError("ACP_SESSION_INIT_FAILED", "ACP session key is required.");
     }
+
+    // Serialize concurrent ensureSession calls for the same session name so that
+    // only one caller performs the dead-session replacement at a time. Subsequent
+    // callers await the in-progress replacement and reuse its result.
+    const existing = this.ensureSessionLocks.get(sessionName);
+    if (existing) {
+      return await existing;
+    }
+
+    const task = this.ensureSessionCore(input, sessionName);
+    this.ensureSessionLocks.set(sessionName, task);
+    try {
+      return await task;
+    } finally {
+      // Only clean up if this is still the same promise (guard against re-entrant replacement).
+      if (this.ensureSessionLocks.get(sessionName) === task) {
+        this.ensureSessionLocks.delete(sessionName);
+      }
+    }
+  }
+
+  private async ensureSessionCore(
+    input: AcpRuntimeEnsureInput,
+    sessionName: string,
+  ): Promise<AcpRuntimeHandle> {
     const agent = asTrimmedString(input.agent);
     if (!agent) {
       throw new AcpRuntimeError("ACP_SESSION_INIT_FAILED", "ACP agent id is required.");
