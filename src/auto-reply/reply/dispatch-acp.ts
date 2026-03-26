@@ -228,12 +228,15 @@ async function finalizeAcpTurnOutput(params: {
   }
 
   // Some ACP parent surfaces only expose terminal replies, so block routing alone is not enough
-  // to prove the final result was visible to the user.
+  // to prove the final result was visible to the user. However, if blocks were already delivered
+  // (e.g. via live streaming), the user has already seen the content — skip the fallback to
+  // avoid sending a duplicate message.
   const shouldDeliverTextFallback =
     ttsMode !== "all" &&
     hasAccumulatedBlockText &&
     !finalMediaDelivered &&
-    !params.delivery.hasDeliveredFinalReply();
+    !params.delivery.hasDeliveredFinalReply() &&
+    params.delivery.getBlockCount() === 0;
   if (shouldDeliverTextFallback) {
     const delivered = await params.delivery.deliver(
       "final",
